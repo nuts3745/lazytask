@@ -226,3 +226,70 @@ func TestWeeklyViewUsesAvailableHeight(t *testing.T) {
 		t.Fatalf("expected weekly task in view:\n%s", view)
 	}
 }
+
+func TestWeeklyHeadersRemainVisibleWhenSelectedTaskScrolls(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	for i := 0; i < 6; i++ {
+		if _, err := store.Create(TaskInput{
+			Title:     "Monday task",
+			Start:     StartDate,
+			StartDate: "2026-05-04",
+		}); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+	model.view = KindWeekly
+	model.width = 100
+	model.selected = 4
+
+	view := model.weeklyView(5)
+	if !strings.Contains(view, "Mon 05-04") {
+		t.Fatalf("expected monday header to remain visible:\n%s", view)
+	}
+	if !strings.Contains(view, "════════") {
+		t.Fatalf("expected header separator to remain visible:\n%s", view)
+	}
+}
+
+func TestWeeklyViewRendersCompletedTask(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	task, err := store.Create(TaskInput{Title: "Done this week", Start: StartAnytime})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if err := store.Complete(task.ID, "2026-05-06"); err != nil {
+		t.Fatalf("complete task: %v", err)
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+	model.view = KindWeekly
+	model.width = 100
+
+	view := model.weeklyView(8)
+	if !strings.Contains(view, "Done this") || !strings.Contains(view, "[x]") {
+		t.Fatalf("expected completed task in weekly view:\n%s", view)
+	}
+}
+
+func TestCompletedTaskLineDoesNotLeakANSISequences(t *testing.T) {
+	model := NewModel(nil)
+	line := model.taskLine(Task{
+		Title:       "done task",
+		Start:       StartDate,
+		StartDate:   "2026-04-28",
+		Deadline:    "2026-04-29",
+		CompletedAt: "2026-05-03",
+	}, false)
+
+	if strings.Contains(line, "[38;5;") || strings.Contains(line, "[0m") {
+		t.Fatalf("completed line leaked ansi sequence: %q", line)
+	}
+}

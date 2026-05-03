@@ -61,6 +61,35 @@ func TestWorkWeekStartsMondayAndEndsFriday(t *testing.T) {
 	}
 }
 
+func TestWorkWeekIncludesCompletedTasksByCompletionDate(t *testing.T) {
+	monday, _ := ParseLocalDate("2026-05-04")
+	tasks := []Task{
+		{ID: "old-plan", Title: "Old Plan", Start: StartDate, StartDate: "2026-04-30", CompletedAt: "2026-05-06"},
+		{ID: "outside-week", Title: "Outside", Start: StartDate, StartDate: "2026-04-30", CompletedAt: "2026-05-09"},
+	}
+
+	week := WorkWeek(tasks, monday)
+	if len(week[2].Tasks) != 1 || week[2].Tasks[0].ID != "old-plan" {
+		t.Fatalf("expected completed task on wednesday, got %#v", week[2].Tasks)
+	}
+}
+
+func TestWorkWeekKeepsCompletedTasksOnPlannedDate(t *testing.T) {
+	monday, _ := ParseLocalDate("2026-05-04")
+	tasks := []Task{
+		{ID: "planned-done", Title: "Planned Done", Start: StartDate, StartDate: "2026-05-05", CompletedAt: "2026-05-10"},
+		{ID: "due-done", Title: "Due Done", Start: StartAnytime, Deadline: "2026-05-07", CompletedAt: "2026-05-10"},
+	}
+
+	week := WorkWeek(tasks, monday)
+	if len(week[1].Tasks) != 1 || week[1].Tasks[0].ID != "planned-done" {
+		t.Fatalf("expected completed planned task on tuesday, got %#v", week[1].Tasks)
+	}
+	if len(week[3].Tasks) != 1 || week[3].Tasks[0].ID != "due-done" {
+		t.Fatalf("expected completed due task on thursday, got %#v", week[3].Tasks)
+	}
+}
+
 func TestFilteredTasksByTagProjectArea(t *testing.T) {
 	tasks := []Task{
 		{ID: "tag", Title: "Tagged", Start: StartAnytime, Tags: []string{"urgent"}, Project: "Work", Area: "Office"},

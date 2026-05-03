@@ -113,13 +113,20 @@ func (m Model) View() string {
 	if m.prompt != nil {
 		return m.prompt.View(m)
 	}
-	header := headerStyle.Render("LazyTask") + " " + subtleStyle.Render(m.title())
+	header := m.headerView()
 	if m.err != "" {
 		header += " " + errorStyle.Render(m.err)
 	}
-	help := subtleStyle.Render("tab views  a quick add  / find  : command  j/k move  t today  space done  d delete  q quit")
+	help := helpStyle.Render("[tab] views  [a] capture  [/] scan  [:] command  [j/k] lock  [t] today  [space] done  [d] delete  [q] exit")
 	body := m.listView(m.bodyHeight())
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, "", help)
+}
+
+func (m Model) headerView() string {
+	title := headerStyle.Render(" LAZYTASK // OPS CONSOLE ")
+	view := statusStyle.Render(" VIEW [" + strings.ToUpper(m.title()) + "] ")
+	count := subtleStyle.Render(fmt.Sprintf(" TARGETS %02d ", len(m.visibleTasks())))
+	return lipgloss.JoinHorizontal(lipgloss.Center, title, " ", view, " ", count)
 }
 
 func (m Model) bodyHeight() int {
@@ -174,36 +181,41 @@ func (m Model) weeklyView(height int) string {
 	if m.width > 20 {
 		width = max(16, (m.width-4)/5)
 	}
-	columns := make([]string, 0, len(week))
+	taskHeight := 0
+	if height > 0 {
+		taskHeight = max(0, height-2)
+	}
+	headerCells := make([]string, 0, len(week))
+	separatorCells := make([]string, 0, len(week))
+	bodyColumns := make([]string, 0, len(week))
 	for _, day := range week {
-		lines := []string{
-			dayStyle.Render(day.Label + " " + day.Date[5:]),
-			subtleStyle.Render(strings.Repeat("─", max(1, width-1))),
+		visibleTasks := day.Tasks
+		if taskHeight > 0 {
+			visibleTasks = visibleWeeklyTasks(day.Tasks, selectedID, taskHeight)
 		}
+		headerCells = append(headerCells, weeklyColumnStyle.Width(width).Render(dayStyle.Render("["+day.Label+" "+day.Date[5:]+"]")))
+		separatorCells = append(separatorCells, weeklyColumnStyle.Width(width).Render(gridStyle.Render(strings.Repeat("═", max(1, width-1)))))
+
+		lines := make([]string, 0, len(visibleTasks)+1)
 		if len(day.Tasks) == 0 {
-			lines = append(lines, subtleStyle.Render("No tasks"))
+			lines = append(lines, subtleStyle.Render("standby"))
 		}
-		taskLimit := len(day.Tasks)
-		if height > 0 {
-			taskLimit = max(0, height-3)
-			if taskLimit > len(day.Tasks) {
-				taskLimit = len(day.Tasks)
-			}
-		}
-		for _, task := range day.Tasks[:taskLimit] {
+		for _, task := range visibleTasks {
 			lines = append(lines, m.weeklyTaskLine(task, task.ID == selectedID, width-1))
 		}
-		if taskLimit < len(day.Tasks) {
-			lines = append(lines, subtleStyle.Render(fmt.Sprintf("+%d more", len(day.Tasks)-taskLimit)))
+		if len(visibleTasks) < len(day.Tasks) {
+			lines = append(lines, subtleStyle.Render(fmt.Sprintf("+%d more", len(day.Tasks)-len(visibleTasks))))
 		}
-		column := fillHeight(strings.Join(lines, "\n"), height)
-		style := weeklyColumnStyle.Width(width)
-		if height > 0 {
-			style = style.Height(height)
+		body := strings.Join(lines, "\n")
+		if taskHeight > 0 {
+			body = fillHeight(body, taskHeight)
 		}
-		columns = append(columns, style.Render(column))
+		bodyColumns = append(bodyColumns, weeklyColumnStyle.Width(width).Render(body))
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, columns...)
+	header := lipgloss.JoinHorizontal(lipgloss.Top, headerCells...)
+	separator := lipgloss.JoinHorizontal(lipgloss.Top, separatorCells...)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, bodyColumns...)
+	return fillHeight(lipgloss.JoinVertical(lipgloss.Left, header, separator, body), height)
 }
 
 func (m Model) taskLine(task Task, selected bool) string {
@@ -220,7 +232,11 @@ func (m Model) taskLine(task Task, selected bool) string {
 	}
 	line := fmt.Sprintf("%s %s %s", cursor, check, task.Title)
 	if meta := taskMeta(task); meta != "" {
-		line += subtleStyle.Render("  " + meta)
+		if task.CompletedAt != "" || task.CanceledAt != "" {
+			line += "  " + meta
+		} else {
+			line += metaStyle.Render("  " + meta)
+		}
 	}
 	if selected {
 		return selectedStyle.Render(line)
@@ -577,7 +593,7 @@ func (p *linePrompt) Update(msg tea.Msg) (*linePrompt, promptAction, tea.Cmd) {
 }
 
 func (p *linePrompt) View(m Model) string {
-	lines := []string{headerStyle.Render(p.label), p.input.View()}
+	lines := []string{headerStyle.Render(" " + strings.ToUpper(p.label) + " "), p.input.View()}
 	if p.kind == promptSearch {
 		lines = append(lines, "", subtleStyle.Render("try: #urgent  >Work  /Home  today  weekly"))
 		lines = append(lines, m.searchHints(p.input.Value())...)
@@ -713,12 +729,43 @@ func visibleIndexes(total, selected, height int) []int {
 	return indexes
 }
 
+func visibleWeeklyTasks(tasks []Task, selectedID string, height int) []Task {
+	if len(tasks) == 0 {
+		return tasks
+	}
+	if height <= 0 || len(tasks) <= height {
+		return tasks
+	}
+	selected := -1
+	for i, task := range tasks {
+		if task.ID == selectedID {
+			selected = i
+			break
+		}
+	}
+	if selected < 0 {
+		return tasks[:height]
+	}
+	start := selected - height/2
+	if start < 0 {
+		start = 0
+	}
+	if start+height > len(tasks) {
+		start = len(tasks) - height
+	}
+	return tasks[start : start+height]
+}
+
 var (
-	headerStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	subtleStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	selectedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("57"))
+	headerStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("25"))
+	statusStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51")).Background(lipgloss.Color("236"))
+	subtleStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+	metaStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	helpStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("109"))
+	selectedStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("16")).Background(lipgloss.Color("51"))
 	doneStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Strikethrough(true)
-	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	dayStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+	errorStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("203"))
+	dayStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51"))
+	gridStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("25"))
 	weeklyColumnStyle = lipgloss.NewStyle().PaddingRight(1)
 )

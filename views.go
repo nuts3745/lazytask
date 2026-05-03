@@ -111,7 +111,7 @@ func WorkWeek(tasks []Task, day time.Time) []WeekDay {
 		}
 		for i := range week {
 			date := week[i].Date
-			if task.CompletedAt == date || task.CanceledAt == date || (task.Active() && (task.StartDate == date || task.Deadline == date)) {
+			if task.StartDate == date || task.Deadline == date || task.CompletedAt == date || task.CanceledAt == date {
 				week[i].Tasks = append(week[i].Tasks, task)
 				break
 			}
