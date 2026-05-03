@@ -19,6 +19,7 @@ const (
 	EventTaskUpdated     EventType = "task_updated"
 	EventTaskCompleted   EventType = "task_completed"
 	EventTaskUncompleted EventType = "task_uncompleted"
+	EventTaskCanceled    EventType = "task_canceled"
 	EventTaskDeleted     EventType = "task_deleted"
 )
 

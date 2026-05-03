@@ -5,9 +5,10 @@
 LazyTask is a Go 1.24 terminal task manager. Library source files live at the repository root, and the CLI entrypoint lives under `cmd/lazytask`:
 
 - `task.go` defines the Things-style task model and input validation.
+- `parser.go` parses quick-add and command date syntax.
 - `event.go` reads and appends JSONL events.
 - `store.go` replays events into the current task projection.
-- `views.go` contains Today and Monday-Friday week view logic.
+- `views.go` contains fixed views, Weekly projection, and loose metadata filters.
 - `tui.go` contains the Bubble Tea model and key handling.
 
 Keep reusable package code in root-level `.go` files. Put executable commands under `cmd/`. Add tests beside the code with `_test.go` suffixes.
@@ -29,7 +30,7 @@ Follow standard Go style and let `gofmt` handle indentation and spacing. Use exp
 
 ## Testing Guidelines
 
-Use Go’s built-in `testing` package. Name tests with `Test<Behavior>` and make assertions directly with `t.Fatalf` or `t.Errorf`. Add tests for event replay, malformed JSONL logs, date projections, TUI state transitions, and concurrency-sensitive store behavior. Run `go test ./...` before opening a pull request; use `go test -race ./...` when shared state is involved.
+Use Go’s built-in `testing` package. Name tests with `Test<Behavior>` and make assertions directly with `t.Fatalf` or `t.Errorf`. Add tests for quick-add parsing, event replay, malformed JSONL logs, date projections, filters, TUI state transitions, and concurrency-sensitive store behavior. Run `go test ./...` before opening a pull request; use `go test -race ./...` when shared state is involved.
 
 ## Commit & Pull Request Guidelines
 
@@ -39,4 +40,4 @@ Pull requests should include a short description, the reason for the change, and
 
 ## Agent-Specific Instructions
 
-Do not introduce generated files or broad refactors unless the task requires them. Preserve JSONL event compatibility where possible, and update `README.md` when public usage or key bindings change.
+Do not introduce generated files or broad refactors unless the task requires them. JSONL compatibility is not guaranteed during early schema iteration; update `README.md` when public usage, quick-add syntax, view modes, or key bindings change.

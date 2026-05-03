@@ -16,10 +16,11 @@ func TestEventLogReplaysTaskLifecycle(t *testing.T) {
 	store.SetClock(fixedClock("2026-05-04"))
 
 	task, err := store.Create(TaskInput{
-		Title:   "Plan week",
-		When:    "2026-05-04",
-		Project: "Work",
-		Tags:    []string{"planning", "planning"},
+		Title:     "Plan week",
+		Start:     StartDate,
+		StartDate: "2026-05-04",
+		Project:   "Work",
+		Tags:      []string{"planning", "planning"},
 	})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
@@ -54,12 +55,23 @@ func TestEventLogReportsMalformedJSONLine(t *testing.T) {
 	}
 }
 
+func TestEventLogReportsOldTaskPayload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lazytask.jsonl")
+	old := `{"eventID":"evt_old","type":"task_created","taskID":"task_old","timestamp":"2026-05-04T00:00:00Z","payload":{"id":"task_old","title":"Old","when":"2026-05-04","createdAt":"2026-05-04T00:00:00Z","updatedAt":"2026-05-04T00:00:00Z"}}` + "\n"
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	if _, err := NewStore(NewEventLog(path)); err == nil {
+		t.Fatal("expected old payload error")
+	}
+}
+
 func TestTaskInputValidation(t *testing.T) {
 	if err := (TaskInput{Title: "  "}).Validate(); err == nil {
 		t.Fatal("expected missing title error")
 	}
-	if err := (TaskInput{Title: "Task", When: "05-04-2026"}).Validate(); err == nil {
-		t.Fatal("expected invalid when date error")
+	if err := (TaskInput{Title: "Task", Start: StartDate, StartDate: "05-04-2026"}).Validate(); err == nil {
+		t.Fatal("expected invalid start date error")
 	}
 }
 
@@ -68,7 +80,7 @@ func TestDeleteUsesTombstoneProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new memory store: %v", err)
 	}
-	task, err := store.Create(TaskInput{Title: "Remove me", When: "2026-05-04"})
+	task, err := store.Create(TaskInput{Title: "Remove me", Start: StartDate, StartDate: "2026-05-04"})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}

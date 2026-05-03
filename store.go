@@ -65,7 +65,8 @@ func (s *Store) Create(input TaskInput) (Task, error) {
 		ID:        newID("task"),
 		Title:     input.Title,
 		Notes:     input.Notes,
-		When:      input.When,
+		Start:     input.Start,
+		StartDate: input.StartDate,
 		Deadline:  input.Deadline,
 		Project:   input.Project,
 		Area:      input.Area,
@@ -90,13 +91,14 @@ func (s *Store) Update(id string, input TaskInput) (Task, error) {
 	}
 	now := s.now().In(time.Local)
 	payload := updatePayload{
-		Title:    input.Title,
-		Notes:    input.Notes,
-		When:     input.When,
-		Deadline: input.Deadline,
-		Project:  input.Project,
-		Area:     input.Area,
-		Tags:     input.Tags,
+		Title:     input.Title,
+		Notes:     input.Notes,
+		Start:     input.Start,
+		StartDate: input.StartDate,
+		Deadline:  input.Deadline,
+		Project:   input.Project,
+		Area:      input.Area,
+		Tags:      input.Tags,
 	}
 	event, err := newEvent(EventTaskUpdated, id, now, payload)
 	if err != nil {
@@ -131,6 +133,20 @@ func (s *Store) Uncomplete(id string) error {
 	return s.commit(event)
 }
 
+func (s *Store) Cancel(id, date string) error {
+	if date == "" {
+		date = FormatLocalDate(s.now())
+	}
+	if err := validateDate("canceledAt", date); err != nil {
+		return err
+	}
+	event, err := newEvent(EventTaskCanceled, id, s.now().In(time.Local), cancelPayload{CanceledAt: date})
+	if err != nil {
+		return err
+	}
+	return s.commit(event)
+}
+
 func (s *Store) Delete(id string) error {
 	event, err := newEvent(EventTaskDeleted, id, s.now().In(time.Local), nil)
 	if err != nil {
@@ -157,14 +173,14 @@ func (s *Store) List() []Task {
 		}
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {
-		if tasks[i].When != tasks[j].When {
-			if tasks[i].When == "" {
+		if tasks[i].StartDate != tasks[j].StartDate {
+			if tasks[i].StartDate == "" {
 				return false
 			}
-			if tasks[j].When == "" {
+			if tasks[j].StartDate == "" {
 				return true
 			}
-			return tasks[i].When < tasks[j].When
+			return tasks[i].StartDate < tasks[j].StartDate
 		}
 		return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
 	})
@@ -199,6 +215,12 @@ func (s *Store) apply(event Event) error {
 		if task.ID == "" {
 			task.ID = event.TaskID
 		}
+		if task.Start == "" {
+			return fmt.Errorf("unsupported old task payload for %s: remove or recreate the JSONL log", event.TaskID)
+		}
+		if err := task.Input().Validate(); err != nil {
+			return err
+		}
 		if _, exists := s.tasks[task.ID]; !exists {
 			s.order = append(s.order, task.ID)
 		}
@@ -214,12 +236,16 @@ func (s *Store) apply(event Event) error {
 		}
 		task.Title = payload.Title
 		task.Notes = payload.Notes
-		task.When = payload.When
+		task.Start = payload.Start
+		task.StartDate = payload.StartDate
 		task.Deadline = payload.Deadline
 		task.Project = payload.Project
 		task.Area = payload.Area
 		task.Tags = normalizeTags(payload.Tags)
 		task.UpdatedAt = event.Timestamp
+		if err := task.Input().Validate(); err != nil {
+			return err
+		}
 		s.tasks[event.TaskID] = task
 	case EventTaskCompleted:
 		task, ok := s.tasks[event.TaskID]
@@ -239,6 +265,18 @@ func (s *Store) apply(event Event) error {
 			return fmt.Errorf("task not found: %s", event.TaskID)
 		}
 		task.CompletedAt = ""
+		task.UpdatedAt = event.Timestamp
+		s.tasks[event.TaskID] = task
+	case EventTaskCanceled:
+		task, ok := s.tasks[event.TaskID]
+		if !ok || task.Deleted {
+			return fmt.Errorf("task not found: %s", event.TaskID)
+		}
+		var payload cancelPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return err
+		}
+		task.CanceledAt = payload.CanceledAt
 		task.UpdatedAt = event.Timestamp
 		s.tasks[event.TaskID] = task
 	case EventTaskDeleted:
@@ -270,15 +308,20 @@ func (s *Store) clone() *Store {
 }
 
 type updatePayload struct {
-	Title    string   `json:"title"`
-	Notes    string   `json:"notes,omitempty"`
-	When     string   `json:"when,omitempty"`
-	Deadline string   `json:"deadline,omitempty"`
-	Project  string   `json:"project,omitempty"`
-	Area     string   `json:"area,omitempty"`
-	Tags     []string `json:"tags,omitempty"`
+	Title     string   `json:"title"`
+	Notes     string   `json:"notes,omitempty"`
+	Start     Start    `json:"start"`
+	StartDate string   `json:"startDate,omitempty"`
+	Deadline  string   `json:"deadline,omitempty"`
+	Project   string   `json:"project,omitempty"`
+	Area      string   `json:"area,omitempty"`
+	Tags      []string `json:"tags,omitempty"`
 }
 
 type completePayload struct {
 	CompletedAt string `json:"completedAt"`
+}
+
+type cancelPayload struct {
+	CanceledAt string `json:"canceledAt"`
 }

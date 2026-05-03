@@ -1,6 +1,29 @@
 package lazytask
 
-import "time"
+import (
+	"sort"
+	"strings"
+	"time"
+)
+
+type ViewKind string
+
+const (
+	KindInbox   ViewKind = "Inbox"
+	KindToday   ViewKind = "Today"
+	KindWeekly  ViewKind = "Weekly"
+	KindAnytime ViewKind = "Anytime"
+	KindSomeday ViewKind = "Someday"
+	KindLogbook ViewKind = "Logbook"
+	KindFilter  ViewKind = "Filter"
+)
+
+type Filter struct {
+	Tag     string
+	Project string
+	Area    string
+	Query   string
+}
 
 type WeekDay struct {
 	Date  string
@@ -8,18 +31,66 @@ type WeekDay struct {
 	Tasks []Task
 }
 
+func InboxTasks(tasks []Task) []Task {
+	return filterTasks(tasks, func(task Task) bool {
+		return task.Active() && task.Start == StartInbox
+	})
+}
+
 func TodayTasks(tasks []Task, day time.Time) []Task {
 	date := FormatLocalDate(day)
-	out := make([]Task, 0)
-	for _, task := range tasks {
+	return filterTasks(tasks, func(task Task) bool {
 		if task.Deleted {
-			continue
+			return false
 		}
-		if task.When == date || task.CompletedAt == date {
-			out = append(out, task)
+		if task.CompletedAt == date || task.CanceledAt == date {
+			return true
 		}
-	}
-	return out
+		return task.Active() && (task.StartDate == date || task.Deadline == date)
+	})
+}
+
+func AnytimeTasks(tasks []Task) []Task {
+	return filterTasks(tasks, func(task Task) bool {
+		return task.Active() && task.Start == StartAnytime
+	})
+}
+
+func SomedayTasks(tasks []Task) []Task {
+	return filterTasks(tasks, func(task Task) bool {
+		return task.Active() && task.Start == StartSomeday
+	})
+}
+
+func LogbookTasks(tasks []Task) []Task {
+	return filterTasks(tasks, func(task Task) bool {
+		return !task.Deleted && (task.CompletedAt != "" || task.CanceledAt != "")
+	})
+}
+
+func FilteredTasks(tasks []Task, filter Filter) []Task {
+	query := strings.ToLower(strings.TrimSpace(filter.Query))
+	tag := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(filter.Tag)), "#")
+	project := strings.ToLower(strings.TrimSpace(filter.Project))
+	area := strings.ToLower(strings.TrimSpace(filter.Area))
+	return filterTasks(tasks, func(task Task) bool {
+		if task.Deleted {
+			return false
+		}
+		if tag != "" && !hasTag(task, tag) {
+			return false
+		}
+		if project != "" && strings.ToLower(task.Project) != project {
+			return false
+		}
+		if area != "" && strings.ToLower(task.Area) != area {
+			return false
+		}
+		if query != "" && !strings.Contains(strings.ToLower(searchText(task)), query) {
+			return false
+		}
+		return true
+	})
 }
 
 func WorkWeek(tasks []Task, day time.Time) []WeekDay {
@@ -39,7 +110,8 @@ func WorkWeek(tasks []Task, day time.Time) []WeekDay {
 			continue
 		}
 		for i := range week {
-			if task.When == week[i].Date || task.CompletedAt == week[i].Date {
+			date := week[i].Date
+			if task.CompletedAt == date || task.CanceledAt == date || (task.Active() && (task.StartDate == date || task.Deadline == date)) {
 				week[i].Tasks = append(week[i].Tasks, task)
 				break
 			}
@@ -70,4 +142,74 @@ func FlattenWeek(week []WeekDay) []Task {
 		}
 	}
 	return out
+}
+
+func KnownTags(tasks []Task) []string {
+	set := make(map[string]struct{})
+	for _, task := range tasks {
+		for _, tag := range task.Tags {
+			set[tag] = struct{}{}
+		}
+	}
+	return sortedKeys(set)
+}
+
+func KnownProjects(tasks []Task) []string {
+	set := make(map[string]struct{})
+	for _, task := range tasks {
+		if task.Project != "" {
+			set[task.Project] = struct{}{}
+		}
+	}
+	return sortedKeys(set)
+}
+
+func KnownAreas(tasks []Task) []string {
+	set := make(map[string]struct{})
+	for _, task := range tasks {
+		if task.Area != "" {
+			set[task.Area] = struct{}{}
+		}
+	}
+	return sortedKeys(set)
+}
+
+func filterTasks(tasks []Task, keep func(Task) bool) []Task {
+	out := make([]Task, 0)
+	for _, task := range tasks {
+		if keep(task) {
+			out = append(out, task)
+		}
+	}
+	return out
+}
+
+func hasTag(task Task, tag string) bool {
+	for _, value := range task.Tags {
+		if strings.ToLower(value) == tag {
+			return true
+		}
+	}
+	return false
+}
+
+func searchText(task Task) string {
+	return strings.Join([]string{
+		task.Title,
+		task.Notes,
+		task.Project,
+		task.Area,
+		JoinTags(task.Tags),
+		task.StartDate,
+		task.Deadline,
+	}, " ")
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }

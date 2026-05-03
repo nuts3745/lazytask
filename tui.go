@@ -1,6 +1,7 @@
 package lazytask
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,30 +11,19 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-type ViewMode int
-
-const (
-	ViewToday ViewMode = iota
-	ViewWeek
-)
-
 type Model struct {
 	store    *Store
 	now      func() time.Time
-	mode     ViewMode
+	view     ViewKind
+	filter   Filter
 	selected int
 	width    int
-	height   int
-	form     *taskForm
+	prompt   *linePrompt
 	err      string
 }
 
 func NewModel(store *Store) Model {
-	return Model{
-		store: store,
-		now:   time.Now,
-		mode:  ViewToday,
-	}
+	return Model{store: store, now: time.Now, view: KindInbox}
 }
 
 func RunTUI(path string) error {
@@ -45,53 +35,35 @@ func RunTUI(path string) error {
 	return err
 }
 
-func (m Model) Init() tea.Cmd {
-	return nil
-}
+func (m Model) Init() tea.Cmd { return nil }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if msg, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width = msg.Width
-		m.height = msg.Height
 		return m, nil
 	}
-
-	if m.form != nil {
-		form, action, cmd := m.form.Update(msg)
-		m.form = form
+	if m.prompt != nil {
+		prompt, action, cmd := m.prompt.Update(msg)
+		m.prompt = prompt
 		switch action {
-		case formCancel:
-			m.form = nil
-			m.err = ""
-		case formSave:
-			if err := m.saveForm(); err != nil {
-				m.err = err.Error()
-				m.form.err = m.err
-			} else {
-				m.form = nil
-				m.err = ""
-				m.clampSelection()
-			}
+		case promptCancel:
+			m.prompt = nil
+		case promptSubmit:
+			m.err = errorString(m.runPrompt())
+			m.prompt = nil
+			m.clampSelection()
 		}
 		return m, cmd
 	}
-
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
 	}
-
 	switch key.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "tab":
-		if m.mode == ViewToday {
-			m.mode = ViewWeek
-		} else {
-			m.mode = ViewToday
-		}
-		m.selected = 0
-		m.err = ""
+		m.nextView()
 	case "j", "down":
 		m.selected++
 		m.clampSelection()
@@ -99,10 +71,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selected--
 		m.clampSelection()
 	case "a":
-		m.form = newTaskForm("", TaskInput{When: FormatLocalDate(m.now())})
+		m.prompt = newLinePrompt(promptAdd, "add")
+	case "/":
+		m.prompt = newLinePrompt(promptSearch, "search")
+	case ":":
+		m.prompt = newLinePrompt(promptCommand, "command")
 	case "e":
 		if task, ok := m.selectedTask(); ok {
-			m.form = newTaskForm(task.ID, task.Input())
+			m.prompt = newLinePrompt(promptCommand, "edit")
+			m.prompt.input.SetValue("update " + encodeQuickTask(task.Input()))
+		}
+	case "t":
+		if task, ok := m.selectedTask(); ok {
+			input := task.Input()
+			input.Start = StartDate
+			input.StartDate = FormatLocalDate(m.now())
+			_, err := m.store.Update(task.ID, input)
+			m.err = errorString(err)
+			m.clampSelection()
 		}
 	case " ":
 		if task, ok := m.selectedTask(); ok {
@@ -122,34 +108,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
-	if m.form != nil {
-		return m.form.View(m.width)
+	if m.prompt != nil {
+		return m.prompt.View(m)
 	}
-
-	title := "LazyTask"
-	tab := "Today"
-	if m.mode == ViewWeek {
-		tab = "Week"
-	}
-	header := headerStyle.Render(title) + " " + subtleStyle.Render(tab)
+	header := headerStyle.Render("LazyTask") + " " + subtleStyle.Render(m.title())
 	if m.err != "" {
 		header += " " + errorStyle.Render(m.err)
 	}
-
-	var body string
-	if m.mode == ViewToday {
-		body = m.todayView()
-	} else {
-		body = m.weekView()
-	}
-	help := subtleStyle.Render("tab switch  j/k move  a add  e edit  space complete  d delete  q quit")
+	body := m.listView()
+	help := subtleStyle.Render("tab views  a quick add  / find  : command  j/k move  t today  space done  d delete  q quit")
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, "", help)
 }
 
-func (m Model) todayView() string {
-	tasks := TodayTasks(m.store.List(), m.now())
+func (m Model) title() string {
+	if m.view != KindFilter {
+		return string(m.view)
+	}
+	if m.filter.Tag != "" {
+		return "#" + m.filter.Tag
+	}
+	if m.filter.Project != "" {
+		return ">" + m.filter.Project
+	}
+	if m.filter.Area != "" {
+		return "/" + m.filter.Area
+	}
+	return "Search " + m.filter.Query
+}
+
+func (m Model) listView() string {
+	if m.view == KindWeekly {
+		return m.weeklyView()
+	}
+	tasks := m.visibleTasks()
 	if len(tasks) == 0 {
-		return subtleStyle.Render("No tasks for today. Press a to add one.")
+		return subtleStyle.Render("No tasks. Press a to capture one.")
 	}
 	lines := make([]string, 0, len(tasks))
 	for i, task := range tasks {
@@ -158,7 +151,7 @@ func (m Model) todayView() string {
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) weekView() string {
+func (m Model) weeklyView() string {
 	week := WorkWeek(m.store.List(), m.now())
 	flat := FlattenWeek(week)
 	selectedID := ""
@@ -192,30 +185,37 @@ func (m Model) taskLine(task Task, selected bool) string {
 	if task.CompletedAt != "" {
 		check = "[x]"
 	}
-	meta := taskMeta(task)
+	if task.CanceledAt != "" {
+		check = "[-]"
+	}
 	line := fmt.Sprintf("%s %s %s", cursor, check, task.Title)
-	if meta != "" {
+	if meta := taskMeta(task); meta != "" {
 		line += subtleStyle.Render("  " + meta)
 	}
 	if selected {
 		return selectedStyle.Render(line)
 	}
-	if task.CompletedAt != "" {
+	if task.CompletedAt != "" || task.CanceledAt != "" {
 		return doneStyle.Render(line)
 	}
 	return line
 }
 
 func taskMeta(task Task) string {
-	parts := make([]string, 0, 4)
-	if task.Project != "" {
-		parts = append(parts, task.Project)
-	}
-	if task.Area != "" {
-		parts = append(parts, task.Area)
+	parts := make([]string, 0, 6)
+	if task.Start == StartDate && task.StartDate != "" {
+		parts = append(parts, "@"+task.StartDate)
+	} else if task.Start != "" {
+		parts = append(parts, "@"+string(task.Start))
 	}
 	if task.Deadline != "" {
-		parts = append(parts, "due "+task.Deadline)
+		parts = append(parts, "!"+task.Deadline)
+	}
+	if task.Project != "" {
+		parts = append(parts, ">"+task.Project)
+	}
+	if task.Area != "" {
+		parts = append(parts, "/"+task.Area)
 	}
 	for _, tag := range task.Tags {
 		parts = append(parts, "#"+tag)
@@ -223,14 +223,26 @@ func taskMeta(task Task) string {
 	return strings.Join(parts, " ")
 }
 
-func (m *Model) saveForm() error {
-	input := m.form.Input()
-	if m.form.taskID == "" {
-		_, err := m.store.Create(input)
-		return err
+func (m Model) visibleTasks() []Task {
+	tasks := m.store.List()
+	switch m.view {
+	case KindInbox:
+		return InboxTasks(tasks)
+	case KindToday:
+		return TodayTasks(tasks, m.now())
+	case KindWeekly:
+		return FlattenWeek(WorkWeek(tasks, m.now()))
+	case KindAnytime:
+		return AnytimeTasks(tasks)
+	case KindSomeday:
+		return SomedayTasks(tasks)
+	case KindLogbook:
+		return LogbookTasks(tasks)
+	case KindFilter:
+		return FilteredTasks(tasks, m.filter)
+	default:
+		return InboxTasks(tasks)
 	}
-	_, err := m.store.Update(m.form.taskID, input)
-	return err
 }
 
 func (m Model) selectedTask() (Task, bool) {
@@ -241,11 +253,20 @@ func (m Model) selectedTask() (Task, bool) {
 	return tasks[m.selected], true
 }
 
-func (m Model) visibleTasks() []Task {
-	if m.mode == ViewWeek {
-		return FlattenWeek(WorkWeek(m.store.List(), m.now()))
+func (m *Model) nextView() {
+	order := []ViewKind{KindInbox, KindToday, KindWeekly, KindAnytime, KindSomeday, KindLogbook}
+	for i, kind := range order {
+		if m.view == kind {
+			m.view = order[(i+1)%len(order)]
+			m.filter = Filter{}
+			m.selected = 0
+			m.err = ""
+			return
+		}
 	}
-	return TodayTasks(m.store.List(), m.now())
+	m.view = KindInbox
+	m.filter = Filter{}
+	m.selected = 0
 }
 
 func (m *Model) clampSelection() {
@@ -262,125 +283,283 @@ func (m *Model) clampSelection() {
 	}
 }
 
-type formAction int
+func (m *Model) runPrompt() error {
+	value := strings.TrimSpace(m.prompt.input.Value())
+	switch m.prompt.kind {
+	case promptAdd:
+		input, err := ParseQuickTask(value, m.now())
+		if err != nil {
+			return err
+		}
+		m.applyCreateDefaults(&input)
+		_, err = m.store.Create(input)
+		return err
+	case promptSearch:
+		m.applySearch(value)
+		return nil
+	case promptCommand:
+		return m.runCommand(value)
+	default:
+		return nil
+	}
+}
+
+func (m *Model) applySearch(value string) {
+	value = strings.TrimSpace(value)
+	m.view = KindFilter
+	m.filter = Filter{}
+	switch {
+	case strings.HasPrefix(value, "#"):
+		m.filter.Tag = strings.TrimPrefix(value, "#")
+	case strings.HasPrefix(value, ">"):
+		m.filter.Project = strings.TrimPrefix(value, ">")
+	case strings.HasPrefix(value, "/"):
+		m.filter.Area = strings.TrimPrefix(value, "/")
+	default:
+		switch strings.ToLower(value) {
+		case "inbox":
+			m.view = KindInbox
+		case "today":
+			m.view = KindToday
+		case "weekly", "week":
+			m.view = KindWeekly
+		case "anytime":
+			m.view = KindAnytime
+		case "someday":
+			m.view = KindSomeday
+		case "logbook":
+			m.view = KindLogbook
+		default:
+			m.filter.Query = value
+		}
+	}
+	m.selected = 0
+}
+
+func (m *Model) runCommand(value string) error {
+	parts := strings.Fields(value)
+	if len(parts) == 0 {
+		return nil
+	}
+	cmd := strings.ToLower(parts[0])
+	rest := strings.TrimSpace(strings.TrimPrefix(value, parts[0]))
+	switch cmd {
+	case "add":
+		input, err := ParseQuickTask(rest, m.now())
+		if err != nil {
+			return err
+		}
+		m.applyCreateDefaults(&input)
+		_, err = m.store.Create(input)
+		return err
+	case "update":
+		task, ok := m.selectedTask()
+		if !ok {
+			return errors.New("no selected task")
+		}
+		input, err := ParseQuickTask(rest, m.now())
+		if err != nil {
+			return err
+		}
+		_, err = m.store.Update(task.ID, input)
+		return err
+	case "tag", "untag", "move", "area", "when", "deadline":
+		return m.updateSelected(cmd, rest)
+	case "done":
+		if task, ok := m.selectedTask(); ok {
+			return m.store.Complete(task.ID, FormatLocalDate(m.now()))
+		}
+	case "undone":
+		if task, ok := m.selectedTask(); ok {
+			return m.store.Uncomplete(task.ID)
+		}
+	case "cancel":
+		if task, ok := m.selectedTask(); ok {
+			return m.store.Cancel(task.ID, FormatLocalDate(m.now()))
+		}
+	case "delete":
+		if task, ok := m.selectedTask(); ok {
+			return m.store.Delete(task.ID)
+		}
+	default:
+		return fmt.Errorf("unknown command: %s", cmd)
+	}
+	return errors.New("no selected task")
+}
+
+func (m Model) applyCreateDefaults(input *TaskInput) {
+	if input.Start != StartInbox || input.StartDate != "" {
+		return
+	}
+	switch m.view {
+	case KindToday:
+		input.Start = StartDate
+		input.StartDate = FormatLocalDate(m.now())
+	case KindAnytime:
+		input.Start = StartAnytime
+	case KindSomeday:
+		input.Start = StartSomeday
+	case KindFilter:
+		if m.filter.Tag != "" {
+			input.Tags = normalizeTags(append(input.Tags, m.filter.Tag))
+		}
+		if m.filter.Project != "" {
+			input.Project = m.filter.Project
+		}
+		if m.filter.Area != "" {
+			input.Area = m.filter.Area
+		}
+	}
+}
+
+func (m *Model) updateSelected(cmd, rest string) error {
+	task, ok := m.selectedTask()
+	if !ok {
+		return errors.New("no selected task")
+	}
+	input := task.Input()
+	switch cmd {
+	case "tag":
+		input.Tags = normalizeTags(append(input.Tags, SplitTags(rest)...))
+	case "untag":
+		remove := make(map[string]struct{})
+		for _, tag := range SplitTags(rest) {
+			remove[strings.ToLower(tag)] = struct{}{}
+		}
+		kept := input.Tags[:0]
+		for _, tag := range input.Tags {
+			if _, ok := remove[strings.ToLower(tag)]; !ok {
+				kept = append(kept, tag)
+			}
+		}
+		input.Tags = kept
+	case "move":
+		input.Project = strings.TrimPrefix(strings.TrimSpace(rest), ">")
+		if input.Project != "" && input.Start == StartInbox {
+			input.Start = StartAnytime
+		}
+	case "area":
+		input.Area = strings.TrimPrefix(strings.TrimSpace(rest), "/")
+	case "when":
+		if err := ApplyWhen(&input, rest, m.now()); err != nil {
+			return err
+		}
+	case "deadline":
+		if err := ApplyDeadline(&input, rest); err != nil {
+			return err
+		}
+	}
+	_, err := m.store.Update(task.ID, input)
+	return err
+}
+
+type promptKind int
 
 const (
-	formNone formAction = iota
-	formSave
-	formCancel
+	promptAdd promptKind = iota
+	promptSearch
+	promptCommand
 )
 
-type taskForm struct {
-	taskID string
-	inputs []textinput.Model
-	focus  int
-	err    string
+type promptAction int
+
+const (
+	promptNone promptAction = iota
+	promptSubmit
+	promptCancel
+)
+
+type linePrompt struct {
+	kind  promptKind
+	label string
+	input textinput.Model
 }
 
-func newTaskForm(taskID string, input TaskInput) *taskForm {
-	labels := []struct {
-		placeholder string
-		value       string
-	}{
-		{"title", input.Title},
-		{"notes", input.Notes},
-		{"when YYYY-MM-DD", input.When},
-		{"deadline YYYY-MM-DD", input.Deadline},
-		{"project", input.Project},
-		{"area", input.Area},
-		{"tags comma,separated", JoinTags(input.Tags)},
-	}
-	inputs := make([]textinput.Model, len(labels))
-	for i, field := range labels {
-		ti := textinput.New()
-		ti.Placeholder = field.placeholder
-		ti.SetValue(field.value)
-		ti.CharLimit = 240
-		ti.Width = 48
-		if i == 0 {
-			ti.Focus()
-		}
-		inputs[i] = ti
-	}
-	return &taskForm{taskID: taskID, inputs: inputs}
+func newLinePrompt(kind promptKind, label string) *linePrompt {
+	ti := textinput.New()
+	ti.Focus()
+	ti.Width = 72
+	ti.CharLimit = 500
+	return &linePrompt{kind: kind, label: label, input: ti}
 }
 
-func (f *taskForm) Update(msg tea.Msg) (*taskForm, formAction, tea.Cmd) {
-	key, ok := msg.(tea.KeyMsg)
-	if ok {
+func (p *linePrompt) Update(msg tea.Msg) (*linePrompt, promptAction, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
-		case "ctrl+c":
-			return f, formCancel, tea.Quit
 		case "esc":
-			return f, formCancel, nil
+			return p, promptCancel, nil
 		case "enter":
-			if f.focus == len(f.inputs)-1 {
-				return f, formSave, nil
-			}
-			f.next()
-			return f, formNone, nil
-		case "tab", "down":
-			f.next()
-			return f, formNone, nil
-		case "shift+tab", "up":
-			f.prev()
-			return f, formNone, nil
+			return p, promptSubmit, nil
+		case "ctrl+c":
+			return p, promptCancel, tea.Quit
 		}
 	}
 	var cmd tea.Cmd
-	f.inputs[f.focus], cmd = f.inputs[f.focus].Update(msg)
-	return f, formNone, cmd
+	p.input, cmd = p.input.Update(msg)
+	return p, promptNone, cmd
 }
 
-func (f *taskForm) View(width int) string {
-	title := "Add Task"
-	if f.taskID != "" {
-		title = "Edit Task"
+func (p *linePrompt) View(m Model) string {
+	lines := []string{headerStyle.Render(p.label), p.input.View()}
+	if p.kind == promptSearch {
+		lines = append(lines, "", subtleStyle.Render("try: #urgent  >Work  /Home  today  weekly"))
+		lines = append(lines, m.searchHints(p.input.Value())...)
 	}
-	lines := []string{headerStyle.Render(title)}
-	names := []string{"Title", "Notes", "When", "Deadline", "Project", "Area", "Tags"}
-	for i, input := range f.inputs {
-		label := names[i]
-		if i == f.focus {
-			label = selectedStyle.Render(label)
-		} else {
-			label = subtleStyle.Render(label)
-		}
-		lines = append(lines, label)
-		lines = append(lines, input.View())
+	if p.kind == promptCommand {
+		lines = append(lines, "", subtleStyle.Render("add/tag/untag/move/area/when/deadline/done/undone/cancel/delete"))
 	}
-	if f.err != "" {
-		lines = append(lines, errorStyle.Render(f.err))
-	}
-	lines = append(lines, subtleStyle.Render("enter next/save  tab move  esc cancel"))
+	lines = append(lines, "", subtleStyle.Render("enter apply  esc cancel"))
 	return strings.Join(lines, "\n")
 }
 
-func (f *taskForm) Input() TaskInput {
-	return TaskInput{
-		Title:    f.inputs[0].Value(),
-		Notes:    f.inputs[1].Value(),
-		When:     f.inputs[2].Value(),
-		Deadline: f.inputs[3].Value(),
-		Project:  f.inputs[4].Value(),
-		Area:     f.inputs[5].Value(),
-		Tags:     SplitTags(f.inputs[6].Value()),
+func (m Model) searchHints(query string) []string {
+	query = strings.ToLower(strings.TrimSpace(query))
+	items := []string{"inbox", "today", "weekly", "anytime", "someday", "logbook"}
+	for _, tag := range KnownTags(m.store.List()) {
+		items = append(items, "#"+tag)
 	}
+	for _, project := range KnownProjects(m.store.List()) {
+		items = append(items, ">"+project)
+	}
+	for _, area := range KnownAreas(m.store.List()) {
+		items = append(items, "/"+area)
+	}
+	for _, task := range m.store.List() {
+		items = append(items, task.Title)
+	}
+	out := make([]string, 0, 8)
+	for _, item := range items {
+		if query == "" || strings.Contains(strings.ToLower(item), query) {
+			out = append(out, subtleStyle.Render(item))
+		}
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out
 }
 
-func (f *taskForm) next() {
-	f.inputs[f.focus].Blur()
-	f.focus = (f.focus + 1) % len(f.inputs)
-	f.inputs[f.focus].Focus()
-}
-
-func (f *taskForm) prev() {
-	f.inputs[f.focus].Blur()
-	f.focus--
-	if f.focus < 0 {
-		f.focus = len(f.inputs) - 1
+func encodeQuickTask(input TaskInput) string {
+	parts := []string{input.Title}
+	for _, tag := range input.Tags {
+		parts = append(parts, "#"+tag)
 	}
-	f.inputs[f.focus].Focus()
+	switch input.Start {
+	case StartDate:
+		parts = append(parts, "@"+input.StartDate)
+	case StartAnytime, StartSomeday, StartInbox:
+		parts = append(parts, "@"+string(input.Start))
+	}
+	if input.Deadline != "" {
+		parts = append(parts, "!"+input.Deadline)
+	}
+	if input.Project != "" {
+		parts = append(parts, ">"+input.Project)
+	}
+	if input.Area != "" {
+		parts = append(parts, "/"+input.Area)
+	}
+	return strings.Join(parts, " ")
 }
 
 func errorString(err error) string {

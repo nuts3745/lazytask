@@ -6,13 +6,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestModelSwitchesViewsAndCompletesSelectedTask(t *testing.T) {
+func TestModelCyclesViewsAndCompletesSelectedTask(t *testing.T) {
 	store, err := NewMemoryStore()
 	if err != nil {
 		t.Fatalf("new memory store: %v", err)
 	}
 	store.SetClock(fixedClock("2026-05-04"))
-	task, err := store.Create(TaskInput{Title: "Ship MVP", When: "2026-05-04"})
+	task, err := store.Create(TaskInput{Title: "Ship MVP", Start: StartInbox})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -30,23 +30,135 @@ func TestModelSwitchesViewsAndCompletesSelectedTask(t *testing.T) {
 		t.Fatalf("expected completed today, got %q", got.CompletedAt)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
-	model = updated.(Model)
-	if model.mode != ViewWeek {
-		t.Fatalf("expected week view, got %v", model.mode)
+	for _, want := range []ViewKind{KindToday, KindWeekly, KindAnytime, KindSomeday, KindLogbook, KindInbox} {
+		updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+		model = updated.(Model)
+		if model.view != want {
+			t.Fatalf("expected %s view, got %s", want, model.view)
+		}
 	}
 }
 
-func TestTaskFormRejectsEmptyTitle(t *testing.T) {
+func TestRunCommandAddsAndOrganizesTask(t *testing.T) {
 	store, err := NewMemoryStore()
 	if err != nil {
 		t.Fatalf("new memory store: %v", err)
 	}
 	model := NewModel(store)
-	model.form = newTaskForm("", TaskInput{})
+	model.now = fixedClock("2026-05-04")
 
-	err = model.saveForm()
-	if err == nil {
-		t.Fatal("expected validation error")
+	if err := model.runCommand("add 買い物 #errand @today >Home /生活 !2026-05-05"); err != nil {
+		t.Fatalf("add command: %v", err)
+	}
+	tasks := store.List()
+	if len(tasks) != 1 {
+		t.Fatalf("expected one task, got %#v", tasks)
+	}
+	task := tasks[0]
+	if task.Title != "買い物" || task.Start != StartDate || task.StartDate != "2026-05-04" || task.Project != "Home" || task.Area != "生活" {
+		t.Fatalf("unexpected task: %#v", task)
+	}
+
+	model.view = KindToday
+	if err := model.runCommand("tag #urgent"); err != nil {
+		t.Fatalf("tag command: %v", err)
+	}
+	got, _ := store.Get(task.ID)
+	if len(got.Tags) != 2 || got.Tags[1] != "urgent" {
+		t.Fatalf("expected added tag, got %#v", got.Tags)
+	}
+}
+
+func TestSearchAppliesTagFilter(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Tagged", Start: StartAnytime, Tags: []string{"urgent"}}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	model := NewModel(store)
+
+	model.applySearch("#urgent")
+	if model.view != KindFilter || model.filter.Tag != "urgent" {
+		t.Fatalf("expected tag filter, got view=%s filter=%#v", model.view, model.filter)
+	}
+	if len(model.visibleTasks()) != 1 {
+		t.Fatalf("expected one filtered task, got %#v", model.visibleTasks())
+	}
+}
+
+func TestInboxTKeySchedulesSelectedTaskToday(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	store.SetClock(fixedClock("2026-05-04"))
+	task, err := store.Create(TaskInput{Title: "Plan me", Start: StartInbox})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+	model.view = KindInbox
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	model = updated.(Model)
+
+	got, ok := store.Get(task.ID)
+	if !ok {
+		t.Fatal("expected task")
+	}
+	if got.Start != StartDate || got.StartDate != "2026-05-04" {
+		t.Fatalf("expected task scheduled today, got %#v", got)
+	}
+	if len(model.visibleTasks()) != 0 {
+		t.Fatalf("expected task to leave inbox, got %#v", model.visibleTasks())
+	}
+	model.view = KindToday
+	if len(model.visibleTasks()) != 1 {
+		t.Fatalf("expected task in today, got %#v", model.visibleTasks())
+	}
+}
+
+func TestTodayAddDefaultsTaskToToday(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+	model.view = KindToday
+
+	if err := model.runCommand("add Review plan #work"); err != nil {
+		t.Fatalf("add command: %v", err)
+	}
+	tasks := store.List()
+	if len(tasks) != 1 {
+		t.Fatalf("expected one task, got %#v", tasks)
+	}
+	if tasks[0].Start != StartDate || tasks[0].StartDate != "2026-05-04" {
+		t.Fatalf("expected today default, got %#v", tasks[0])
+	}
+	if len(TodayTasks(tasks, model.now())) != 1 {
+		t.Fatalf("expected task visible today, got %#v", TodayTasks(tasks, model.now()))
+	}
+}
+
+func TestTodayAddRespectsExplicitSomeday(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+	model.view = KindToday
+
+	if err := model.runCommand("add Maybe later @someday"); err != nil {
+		t.Fatalf("add command: %v", err)
+	}
+	tasks := store.List()
+	if tasks[0].Start != StartSomeday {
+		t.Fatalf("expected explicit someday to be preserved, got %#v", tasks[0])
 	}
 }
