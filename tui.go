@@ -18,6 +18,7 @@ type Model struct {
 	filter   Filter
 	selected int
 	width    int
+	height   int
 	prompt   *linePrompt
 	err      string
 }
@@ -40,6 +41,7 @@ func (m Model) Init() tea.Cmd { return nil }
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if msg, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width = msg.Width
+		m.height = msg.Height
 		return m, nil
 	}
 	if m.prompt != nil {
@@ -115,9 +117,16 @@ func (m Model) View() string {
 	if m.err != "" {
 		header += " " + errorStyle.Render(m.err)
 	}
-	body := m.listView()
 	help := subtleStyle.Render("tab views  a quick add  / find  : command  j/k move  t today  space done  d delete  q quit")
+	body := m.listView(m.bodyHeight())
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, "", help)
+}
+
+func (m Model) bodyHeight() int {
+	if m.height <= 0 {
+		return 0
+	}
+	return max(1, m.height-4)
 }
 
 func (m Model) title() string {
@@ -136,22 +145,25 @@ func (m Model) title() string {
 	return "Search " + m.filter.Query
 }
 
-func (m Model) listView() string {
+func (m Model) listView(height int) string {
 	if m.view == KindWeekly {
-		return m.weeklyView()
+		return m.weeklyView(height)
 	}
 	tasks := m.visibleTasks()
 	if len(tasks) == 0 {
-		return subtleStyle.Render("No tasks. Press a to capture one.")
+		return fillHeight(subtleStyle.Render("No tasks. Press a to capture one."), height)
 	}
-	lines := make([]string, 0, len(tasks))
-	for i, task := range tasks {
-		lines = append(lines, m.taskLine(task, i == m.selected))
+	lines := make([]string, 0, len(tasks)+1)
+	for _, i := range visibleIndexes(len(tasks), m.selected, height) {
+		lines = append(lines, m.taskLine(tasks[i], i == m.selected))
 	}
-	return strings.Join(lines, "\n")
+	if height > 0 && len(tasks) > len(lines) {
+		lines = append(lines, subtleStyle.Render(fmt.Sprintf("+%d more", len(tasks)-len(lines))))
+	}
+	return fillHeight(strings.Join(lines, "\n"), height)
 }
 
-func (m Model) weeklyView() string {
+func (m Model) weeklyView(height int) string {
 	week := WorkWeek(m.store.List(), m.now())
 	flat := FlattenWeek(week)
 	selectedID := ""
@@ -160,18 +172,36 @@ func (m Model) weeklyView() string {
 	}
 	width := 24
 	if m.width > 20 {
-		width = max(18, (m.width-8)/5)
+		width = max(16, (m.width-4)/5)
 	}
 	columns := make([]string, 0, len(week))
 	for _, day := range week {
-		lines := []string{dayStyle.Render(day.Label + " " + day.Date)}
+		lines := []string{
+			dayStyle.Render(day.Label + " " + day.Date[5:]),
+			subtleStyle.Render(strings.Repeat("─", max(1, width-1))),
+		}
 		if len(day.Tasks) == 0 {
 			lines = append(lines, subtleStyle.Render("No tasks"))
 		}
-		for _, task := range day.Tasks {
-			lines = append(lines, truncate(m.taskLine(task, task.ID == selectedID), width-1))
+		taskLimit := len(day.Tasks)
+		if height > 0 {
+			taskLimit = max(0, height-3)
+			if taskLimit > len(day.Tasks) {
+				taskLimit = len(day.Tasks)
+			}
 		}
-		columns = append(columns, lipgloss.NewStyle().Width(width).Render(strings.Join(lines, "\n")))
+		for _, task := range day.Tasks[:taskLimit] {
+			lines = append(lines, m.weeklyTaskLine(task, task.ID == selectedID, width-1))
+		}
+		if taskLimit < len(day.Tasks) {
+			lines = append(lines, subtleStyle.Render(fmt.Sprintf("+%d more", len(day.Tasks)-taskLimit)))
+		}
+		column := fillHeight(strings.Join(lines, "\n"), height)
+		style := weeklyColumnStyle.Width(width)
+		if height > 0 {
+			style = style.Height(height)
+		}
+		columns = append(columns, style.Render(column))
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, columns...)
 }
@@ -191,6 +221,40 @@ func (m Model) taskLine(task Task, selected bool) string {
 	line := fmt.Sprintf("%s %s %s", cursor, check, task.Title)
 	if meta := taskMeta(task); meta != "" {
 		line += subtleStyle.Render("  " + meta)
+	}
+	if selected {
+		return selectedStyle.Render(line)
+	}
+	if task.CompletedAt != "" || task.CanceledAt != "" {
+		return doneStyle.Render(line)
+	}
+	return line
+}
+
+func (m Model) weeklyTaskLine(task Task, selected bool, width int) string {
+	cursor := " "
+	if selected {
+		cursor = ">"
+	}
+	check := "[ ]"
+	if task.CompletedAt != "" {
+		check = "[x]"
+	}
+	if task.CanceledAt != "" {
+		check = "[-]"
+	}
+	prefix := fmt.Sprintf("%s %s ", cursor, check)
+	meta := compactWeeklyMeta(task)
+	available := width - len(prefix)
+	if meta != "" {
+		available -= len(meta) + 1
+	}
+	if available < 4 {
+		available = 4
+	}
+	line := prefix + truncateRunes(task.Title, available)
+	if meta != "" {
+		line += " " + meta
 	}
 	if selected {
 		return selectedStyle.Render(line)
@@ -221,6 +285,19 @@ func taskMeta(task Task) string {
 		parts = append(parts, "#"+tag)
 	}
 	return strings.Join(parts, " ")
+}
+
+func compactWeeklyMeta(task Task) string {
+	if task.Deadline != "" {
+		return "!" + task.Deadline[5:]
+	}
+	if len(task.Tags) > 0 {
+		return "#" + task.Tags[0]
+	}
+	if task.Project != "" {
+		return ">" + task.Project
+	}
+	return ""
 }
 
 func (m Model) visibleTasks() []Task {
@@ -579,11 +656,69 @@ func truncate(value string, width int) string {
 	return value[:width-3] + "..."
 }
 
+func truncateRunes(value string, width int) string {
+	runes := []rune(value)
+	if width <= 0 || len(runes) <= width {
+		return value
+	}
+	if width <= 3 {
+		return string(runes[:width])
+	}
+	return string(runes[:width-3]) + "..."
+}
+
+func fillHeight(value string, height int) string {
+	if height <= 0 {
+		return value
+	}
+	lines := strings.Split(value, "\n")
+	if len(lines) >= height {
+		return strings.Join(lines[:height], "\n")
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func visibleIndexes(total, selected, height int) []int {
+	if total <= 0 {
+		return nil
+	}
+	if height <= 0 || total <= height {
+		indexes := make([]int, total)
+		for i := range indexes {
+			indexes[i] = i
+		}
+		return indexes
+	}
+	limit := max(1, height-1)
+	if selected < 0 {
+		selected = 0
+	}
+	if selected >= total {
+		selected = total - 1
+	}
+	start := selected - limit/2
+	if start < 0 {
+		start = 0
+	}
+	if start+limit > total {
+		start = total - limit
+	}
+	indexes := make([]int, 0, limit)
+	for i := start; i < start+limit; i++ {
+		indexes = append(indexes, i)
+	}
+	return indexes
+}
+
 var (
-	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	subtleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("57"))
-	doneStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Strikethrough(true)
-	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	dayStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+	headerStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	subtleStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	selectedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("57"))
+	doneStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Strikethrough(true)
+	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	dayStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+	weeklyColumnStyle = lipgloss.NewStyle().PaddingRight(1)
 )

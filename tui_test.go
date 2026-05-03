@@ -1,6 +1,7 @@
 package lazytask
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -160,5 +161,68 @@ func TestTodayAddRespectsExplicitSomeday(t *testing.T) {
 	tasks := store.List()
 	if tasks[0].Start != StartSomeday {
 		t.Fatalf("expected explicit someday to be preserved, got %#v", tasks[0])
+	}
+}
+
+func TestWeeklyViewDoesNotCollapseJapaneseTaskToEllipsis(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{
+		Title:     "買い物をする",
+		Start:     StartDate,
+		StartDate: "2026-05-04",
+	}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+	model.view = KindWeekly
+	model.width = 80
+
+	view := model.weeklyView(0)
+	if !strings.Contains(view, "買い物") {
+		t.Fatalf("expected weekly view to include readable title, got:\n%s", view)
+	}
+	if strings.Contains(view, "> [ ] ...") || strings.Contains(view, "  [ ] ...") {
+		t.Fatalf("weekly view collapsed task to ellipsis:\n%s", view)
+	}
+}
+
+func TestViewUsesAvailableHeight(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+	model.height = 18
+
+	view := model.View()
+	if got := len(strings.Split(view, "\n")); got < 18 {
+		t.Fatalf("expected view to use available height, got %d lines:\n%s", got, view)
+	}
+}
+
+func TestWeeklyViewUsesAvailableHeight(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Weekly task", Start: StartDate, StartDate: "2026-05-04"}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+	model.view = KindWeekly
+	model.width = 100
+	model.height = 18
+
+	view := model.View()
+	if got := len(strings.Split(view, "\n")); got < 18 {
+		t.Fatalf("expected weekly view to use available height, got %d lines:\n%s", got, view)
+	}
+	if !strings.Contains(view, "Weekly task") {
+		t.Fatalf("expected weekly task in view:\n%s", view)
 	}
 }
