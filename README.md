@@ -1,41 +1,34 @@
 # LazyTask
 
-LazyTask is a Go package for building a Lazygit-like task runner UI.
+LazyTask is a Lazygit-like terminal task manager inspired by Things 3. It stores state as a lightweight JSONL event log and rebuilds the current task list by replaying events.
 
-This first package contains the core task model, an in-memory task store, and a command runner.
+## Run
 
-## Usage
-
-```go
-package main
-
-import (
-	"context"
-	"log"
-
-	"lazytask"
-)
-
-func main() {
-	store := lazytask.NewStore()
-	task := lazytask.NewTask("test", "Run tests", "go", "test", "./...")
-
-	if err := store.Add(task); err != nil {
-		log.Fatal(err)
-	}
-
-	runner := lazytask.NewRunner(store)
-	result, err := runner.Run(context.Background(), "test")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("task %s exited with %d", result.TaskID, result.Code)
-}
+```sh
+go run ./cmd/lazytask
 ```
 
-## Next Steps
+By default, LazyTask writes events to `./lazytask.jsonl`. Pass a path to use another log file:
 
-- Add config loading for task definitions.
-- Add a Bubble Tea based terminal UI.
-- Stream command output instead of waiting for process completion.
+```sh
+go run ./cmd/lazytask ./demo.jsonl
+```
+
+## Views
+
+- Today shows tasks scheduled for today plus tasks completed today.
+- Week shows Monday through Friday and includes tasks scheduled or completed on each day.
+
+## Keys
+
+- `tab`: switch Today / Week
+- `j` / `k`: move selection
+- `a`: add task
+- `e`: edit selected task
+- `space`: complete or reopen selected task
+- `d`: delete selected task
+- `q`: quit
+
+## Storage
+
+Each line in the log is a JSON event such as `task_created`, `task_updated`, `task_completed`, `task_uncompleted`, or `task_deleted`. Deleted tasks are hidden by projection rather than removed from the log.

@@ -2,67 +2,114 @@ package lazytask
 
 import (
 	"errors"
-	"fmt"
+	"strings"
+	"time"
 )
 
-// Status represents the lifecycle state of a task.
-type Status string
+const DateLayout = "2006-01-02"
 
-const (
-	StatusPending Status = "pending"
-	StatusRunning Status = "running"
-	StatusDone    Status = "done"
-	StatusFailed  Status = "failed"
-)
-
-// Task is the core task model used by LazyTask.
+// Task is a Things-style todo item projected from the event log.
 type Task struct {
-	ID          string
-	Name        string
-	Description string
-	Command     []string
-	Status      Status
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	Notes       string    `json:"notes,omitempty"`
+	When        string    `json:"when,omitempty"`
+	Deadline    string    `json:"deadline,omitempty"`
+	CompletedAt string    `json:"completedAt,omitempty"`
+	Canceled    bool      `json:"canceled,omitempty"`
+	Project     string    `json:"project,omitempty"`
+	Area        string    `json:"area,omitempty"`
+	Tags        []string  `json:"tags,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	Deleted     bool      `json:"-"`
 }
 
-// Validate checks whether the task has the minimum fields needed to run.
-func (t Task) Validate() error {
-	if t.ID == "" {
-		return errors.New("task id is required")
+type TaskInput struct {
+	Title    string
+	Notes    string
+	When     string
+	Deadline string
+	Project  string
+	Area     string
+	Tags     []string
+}
+
+func (in TaskInput) Validate() error {
+	if strings.TrimSpace(in.Title) == "" {
+		return errors.New("task title is required")
 	}
-	if t.Name == "" {
-		return errors.New("task name is required")
+	if err := validateDate("when", in.When); err != nil {
+		return err
 	}
-	if len(t.Command) == 0 {
-		return errors.New("task command is required")
-	}
-	if t.Command[0] == "" {
-		return errors.New("task command executable is required")
-	}
-	if t.Status == "" {
-		return errors.New("task status is required")
-	}
-	if !t.Status.Valid() {
-		return fmt.Errorf("invalid task status: %s", t.Status)
+	if err := validateDate("deadline", in.Deadline); err != nil {
+		return err
 	}
 	return nil
 }
 
-// Valid reports whether the status is known.
-func (s Status) Valid() bool {
-	switch s {
-	case StatusPending, StatusRunning, StatusDone, StatusFailed:
-		return true
-	default:
-		return false
+func (in TaskInput) normalized() TaskInput {
+	in.Title = strings.TrimSpace(in.Title)
+	in.Notes = strings.TrimSpace(in.Notes)
+	in.When = strings.TrimSpace(in.When)
+	in.Deadline = strings.TrimSpace(in.Deadline)
+	in.Project = strings.TrimSpace(in.Project)
+	in.Area = strings.TrimSpace(in.Area)
+	in.Tags = normalizeTags(in.Tags)
+	return in
+}
+
+func (t Task) Input() TaskInput {
+	return TaskInput{
+		Title:    t.Title,
+		Notes:    t.Notes,
+		When:     t.When,
+		Deadline: t.Deadline,
+		Project:  t.Project,
+		Area:     t.Area,
+		Tags:     append([]string(nil), t.Tags...),
 	}
 }
 
-// NewTask creates a pending task.
-func NewTask(id, name string, command ...string) Task {
-	return Task{
-		ID:      id,
-		Name:    name,
-		Command: command,
-		Status:  StatusPending,
+func ParseLocalDate(value string) (time.Time, error) {
+	return time.ParseInLocation(DateLayout, value, time.Local)
+}
+
+func FormatLocalDate(t time.Time) string {
+	return t.In(time.Local).Format(DateLayout)
+}
+
+func validateDate(name, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
 	}
+	if _, err := ParseLocalDate(strings.TrimSpace(value)); err != nil {
+		return errors.New(name + " must use YYYY-MM-DD")
+	}
+	return nil
+}
+
+func normalizeTags(tags []string) []string {
+	seen := make(map[string]struct{}, len(tags))
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(strings.TrimPrefix(tag, "#"))
+		if tag == "" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	return out
+}
+
+func SplitTags(value string) []string {
+	return normalizeTags(strings.Split(value, ","))
+}
+
+func JoinTags(tags []string) string {
+	return strings.Join(normalizeTags(tags), ", ")
 }
