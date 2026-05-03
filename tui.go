@@ -12,19 +12,47 @@ import (
 )
 
 type Model struct {
-	store    *Store
-	now      func() time.Time
-	view     ViewKind
-	filter   Filter
-	selected int
-	width    int
-	height   int
-	prompt   *linePrompt
-	err      string
+	store       *Store
+	now         func() time.Time
+	view        ViewKind
+	filter      Filter
+	selected    int
+	width       int
+	height      int
+	prompt      *linePrompt
+	err         string
+	focusedPane paneKind
+	navSelected int
+	navMode     navMode
+	helpOpen    bool
 }
 
 func NewModel(store *Store) Model {
-	return Model{store: store, now: time.Now, view: KindInbox}
+	return Model{store: store, now: time.Now, view: KindInbox, focusedPane: paneList, navMode: navRoot}
+}
+
+type paneKind string
+
+const (
+	paneNav    paneKind = "nav"
+	paneList   paneKind = "list"
+	paneDetail paneKind = "detail"
+)
+
+type navMode string
+
+const (
+	navRoot     navMode = "root"
+	navTags     navMode = "tags"
+	navProjects navMode = "projects"
+	navAreas    navMode = "areas"
+)
+
+type navItem struct {
+	label string
+	view  ViewKind
+	mode  navMode
+	value string
 }
 
 func RunTUI(path string) error {
@@ -42,6 +70,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if msg, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width = msg.Width
 		m.height = msg.Height
+		if !m.detailPaneVisible() && m.focusedPane == paneDetail {
+			m.focusedPane = paneList
+		}
 		return m, nil
 	}
 	if m.prompt != nil {
@@ -61,30 +92,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	if m.helpOpen {
+		switch key.String() {
+		case "?", "esc":
+			m.helpOpen = false
+			return m, nil
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		default:
+			return m, nil
+		}
+	}
 	switch key.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
+	case "?":
+		m.helpOpen = true
 	case "tab":
-		m.nextView()
+		m.focusNextPane()
+	case "shift+tab":
+		m.focusPrevPane()
+	case "h", "left":
+		m.moveLeft()
+	case "l", "right":
+		m.moveRight()
+	case "esc":
+		if m.navMode != navRoot {
+			mode := m.navMode
+			m.navMode = navRoot
+			m.navSelected = m.rootIndexForMode(mode)
+		}
 	case "j", "down":
-		m.selected++
-		m.clampSelection()
+		m.moveSelection(1)
 	case "k", "up":
-		m.selected--
-		m.clampSelection()
+		m.moveSelection(-1)
+	case "enter":
+		if m.focusedPane == paneNav {
+			m.activateNav()
+		}
 	case "a":
-		m.prompt = newLinePrompt(promptAdd, "add")
+		if m.listKeyActive() {
+			m.prompt = newLinePrompt(promptAdd, "add")
+		}
 	case "/":
-		m.prompt = newLinePrompt(promptSearch, "search")
+		if m.listKeyActive() {
+			m.prompt = newLinePrompt(promptSearch, "search")
+		}
 	case ":":
-		m.prompt = newLinePrompt(promptCommand, "command")
+		if m.listKeyActive() {
+			m.prompt = newLinePrompt(promptCommand, "command")
+		}
 	case "e":
-		if task, ok := m.selectedTask(); ok {
+		if task, ok := m.selectedTask(); ok && m.listKeyActive() {
 			m.prompt = newLinePrompt(promptCommand, "edit")
 			m.prompt.input.SetValue("update " + encodeQuickTask(task.Input()))
 		}
 	case "t":
-		if task, ok := m.selectedTask(); ok {
+		if task, ok := m.selectedTask(); ok && m.listKeyActive() {
 			input := task.Input()
 			input.Start = StartDate
 			input.StartDate = FormatLocalDate(m.now())
@@ -93,7 +157,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampSelection()
 		}
 	case " ":
-		if task, ok := m.selectedTask(); ok {
+		if task, ok := m.selectedTask(); ok && m.listKeyActive() {
 			if task.CompletedAt == "" {
 				m.err = errorString(m.store.Complete(task.ID, FormatLocalDate(m.now())))
 			} else {
@@ -101,7 +165,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "d", "delete", "backspace":
-		if task, ok := m.selectedTask(); ok {
+		if task, ok := m.selectedTask(); ok && m.listKeyActive() {
 			m.err = errorString(m.store.Delete(task.ID))
 			m.clampSelection()
 		}
@@ -117,8 +181,11 @@ func (m Model) View() string {
 	if m.err != "" {
 		header += " " + errorStyle.Render(m.err)
 	}
-	help := helpStyle.Render("[tab] views  [a] capture  [/] scan  [:] command  [j/k] lock  [t] today  [space] done  [d] delete  [q] exit")
-	body := m.listView(m.bodyHeight())
+	body := m.panesView(m.bodyHeight())
+	help := m.statusBarView()
+	if m.helpOpen {
+		body = overlayHelpView(m.bodyHeight(), m.width)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, "", help)
 }
 
@@ -134,6 +201,195 @@ func (m Model) bodyHeight() int {
 		return 0
 	}
 	return max(1, m.height-4)
+}
+
+func (m Model) panesView(height int) string {
+	width := m.width
+	if width <= 0 {
+		width = 120
+	}
+	showDetail := width >= 100
+	navWidth := 22
+	if width < 72 {
+		navWidth = 18
+	}
+	gap := 2
+	detailWidth := 0
+	if showDetail {
+		detailWidth = max(26, width/3)
+	}
+	listWidth := width - navWidth - gap
+	if showDetail {
+		listWidth -= detailWidth + gap
+	}
+	if listWidth < 28 {
+		listWidth = 28
+	}
+
+	nav := paneStyle(m.focusedPane == paneNav, navWidth, height).Render(m.navView(height))
+	listModel := m
+	listModel.width = listWidth
+	list := paneStyle(m.focusedPane == paneList, listWidth, height).Render(listModel.listView(height))
+	if !showDetail {
+		return lipgloss.JoinHorizontal(lipgloss.Top, nav, strings.Repeat(" ", gap), list)
+	}
+	detail := paneStyle(m.focusedPane == paneDetail, detailWidth, height).Render(m.detailView(height))
+	return lipgloss.JoinHorizontal(lipgloss.Top, nav, strings.Repeat(" ", gap), list, strings.Repeat(" ", gap), detail)
+}
+
+func (m Model) navView(height int) string {
+	items := m.navItems()
+	lines := make([]string, 0, len(items)+2)
+	if m.navMode != navRoot {
+		lines = append(lines, subtleStyle.Render("< "+strings.ToUpper(string(m.navMode))))
+	}
+	if len(items) == 0 {
+		lines = append(lines, subtleStyle.Render("No "+string(m.navMode)))
+		return fillHeight(strings.Join(lines, "\n"), height)
+	}
+	for i, item := range items {
+		prefix := "  "
+		if i == m.navSelected {
+			prefix = "> "
+		}
+		label := item.label
+		if item.mode != "" && item.mode != navRoot {
+			label += " >"
+		}
+		line := prefix + label
+		if i == m.navSelected {
+			lines = append(lines, selectedStyle.Render(line))
+			continue
+		}
+		if m.navItemActive(item) {
+			lines = append(lines, statusStyle.Render(line))
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return fillHeight(strings.Join(lines, "\n"), height)
+}
+
+func (m Model) navItems() []navItem {
+	switch m.navMode {
+	case navTags:
+		return valueNavItems(KnownTags(m.store.List()), navTags)
+	case navProjects:
+		return valueNavItems(KnownProjects(m.store.List()), navProjects)
+	case navAreas:
+		return valueNavItems(KnownAreas(m.store.List()), navAreas)
+	default:
+		return []navItem{
+			{label: "Inbox", view: KindInbox},
+			{label: "Today", view: KindToday},
+			{label: "Weekly", view: KindWeekly},
+			{label: "Anytime", view: KindAnytime},
+			{label: "Someday", view: KindSomeday},
+			{label: "Logbook", view: KindLogbook},
+			{label: "Tags", mode: navTags},
+			{label: "Projects", mode: navProjects},
+			{label: "Areas", mode: navAreas},
+		}
+	}
+}
+
+func valueNavItems(values []string, mode navMode) []navItem {
+	items := make([]navItem, 0, len(values))
+	for _, value := range values {
+		label := value
+		switch mode {
+		case navTags:
+			label = "#" + value
+		case navProjects:
+			label = ">" + value
+		case navAreas:
+			label = "/" + value
+		}
+		items = append(items, navItem{label: label, mode: mode, value: value})
+	}
+	return items
+}
+
+func (m Model) navItemActive(item navItem) bool {
+	if m.navMode != navRoot {
+		switch item.mode {
+		case navTags:
+			return m.view == KindFilter && strings.EqualFold(m.filter.Tag, item.value)
+		case navProjects:
+			return m.view == KindFilter && strings.EqualFold(m.filter.Project, item.value)
+		case navAreas:
+			return m.view == KindFilter && strings.EqualFold(m.filter.Area, item.value)
+		}
+		return false
+	}
+	return item.view != "" && m.view == item.view
+}
+
+func (m Model) detailView(height int) string {
+	task, ok := m.selectedTask()
+	if !ok {
+		lines := []string{
+			"VIEW",
+			m.title(),
+			"",
+			fmt.Sprintf("tasks: %d", len(m.visibleTasks())),
+			"",
+			"Select a task in the list to inspect its metadata.",
+		}
+		return fillHeight(strings.Join(lines, "\n"), height)
+	}
+	lines := []string{
+		"DETAIL",
+		task.Title,
+		"",
+		"status: " + taskStatus(task),
+		"start: " + taskStart(task),
+	}
+	if task.Deadline != "" {
+		lines = append(lines, "deadline: "+task.Deadline)
+	}
+	if task.Project != "" {
+		lines = append(lines, "project: "+task.Project)
+	}
+	if task.Area != "" {
+		lines = append(lines, "area: "+task.Area)
+	}
+	if len(task.Tags) > 0 {
+		lines = append(lines, "tags: "+JoinTags(task.Tags))
+	}
+	if task.Notes != "" {
+		lines = append(lines, "", "notes:", task.Notes)
+	}
+	lines = append(lines, "", "created: "+formatTaskTime(task.CreatedAt), "updated: "+formatTaskTime(task.UpdatedAt))
+	lines = append(lines, "", helpStyle.Render("t today  space done  d delete  e edit"))
+	return fillHeight(strings.Join(lines, "\n"), height)
+}
+
+func (m Model) statusBarView() string {
+	return helpStyle.Render(fmt.Sprintf("[tab] pane  [h/l] move  [j/k] select  [enter] open  [?] help  pane:%s  [a] capture  [/] scan  [:] command  [q] exit", m.focusedPane))
+}
+
+func overlayHelpView(height, width int) string {
+	lines := []string{
+		"HELP",
+		"",
+		"tab / shift+tab    cycle panes",
+		"h / l              move between panes",
+		"j / k              move selection",
+		"enter              select nav view or filter",
+		"a                  quick add",
+		"/                  search",
+		":                  command palette",
+		"t                  schedule selected task today",
+		"space              complete or reopen selected task",
+		"d                  delete selected task",
+		"esc                close overlay or return nav to root",
+		"q                  quit",
+	}
+	if width > 0 {
+		return paneStyle(true, max(40, min(width, 72)), height).Render(fillHeight(strings.Join(lines, "\n"), height))
+	}
+	return fillHeight(strings.Join(lines, "\n"), height)
 }
 
 func (m Model) title() string {
@@ -316,6 +572,36 @@ func compactWeeklyMeta(task Task) string {
 	return ""
 }
 
+func taskStatus(task Task) string {
+	switch {
+	case task.Deleted:
+		return "deleted"
+	case task.CompletedAt != "":
+		return "completed " + task.CompletedAt
+	case task.CanceledAt != "":
+		return "canceled " + task.CanceledAt
+	default:
+		return "active"
+	}
+}
+
+func taskStart(task Task) string {
+	if task.Start == StartDate && task.StartDate != "" {
+		return task.StartDate
+	}
+	if task.Start == "" {
+		return string(StartInbox)
+	}
+	return string(task.Start)
+}
+
+func formatTaskTime(value time.Time) string {
+	if value.IsZero() {
+		return "-"
+	}
+	return value.Format("2006-01-02 15:04")
+}
+
 func (m Model) visibleTasks() []Task {
 	tasks := m.store.List()
 	switch m.view {
@@ -346,20 +632,164 @@ func (m Model) selectedTask() (Task, bool) {
 	return tasks[m.selected], true
 }
 
-func (m *Model) nextView() {
-	order := []ViewKind{KindInbox, KindToday, KindWeekly, KindAnytime, KindSomeday, KindLogbook}
-	for i, kind := range order {
-		if m.view == kind {
-			m.view = order[(i+1)%len(order)]
-			m.filter = Filter{}
-			m.selected = 0
-			m.err = ""
+func (m Model) detailPaneVisible() bool {
+	if m.width <= 0 {
+		return true
+	}
+	return m.width >= 100
+}
+
+func (m *Model) focusNextPane() {
+	switch m.focusedPane {
+	case paneNav:
+		m.focusedPane = paneList
+	case paneList:
+		if m.detailPaneVisible() {
+			m.focusedPane = paneDetail
+		} else {
+			m.focusedPane = paneNav
+		}
+	default:
+		m.focusedPane = paneNav
+	}
+}
+
+func (m *Model) focusPrevPane() {
+	switch m.focusedPane {
+	case paneNav:
+		if m.detailPaneVisible() {
+			m.focusedPane = paneDetail
+		} else {
+			m.focusedPane = paneList
+		}
+	case paneDetail:
+		m.focusedPane = paneList
+	default:
+		m.focusedPane = paneNav
+	}
+}
+
+func (m *Model) moveLeft() {
+	switch m.focusedPane {
+	case paneNav:
+		if m.navMode != navRoot {
+			mode := m.navMode
+			m.navMode = navRoot
+			m.navSelected = m.rootIndexForMode(mode)
+		}
+	case paneList:
+		m.focusedPane = paneNav
+	case paneDetail:
+		m.focusedPane = paneList
+	}
+}
+
+func (m *Model) moveRight() {
+	switch m.focusedPane {
+	case paneNav:
+		if m.navSelectedItemOpens() {
+			m.openNavMode()
 			return
 		}
+		m.focusedPane = paneList
+	case paneList:
+		if m.detailPaneVisible() {
+			m.focusedPane = paneDetail
+		}
 	}
-	m.view = KindInbox
-	m.filter = Filter{}
-	m.selected = 0
+}
+
+func (m *Model) moveSelection(delta int) {
+	if m.focusedPane == paneNav {
+		m.navSelected += delta
+		m.clampNavSelection()
+		return
+	}
+	if m.focusedPane == paneList {
+		m.selected += delta
+		m.clampSelection()
+	}
+}
+
+func (m Model) listKeyActive() bool {
+	return m.focusedPane == paneList
+}
+
+func (m *Model) activateNav() {
+	items := m.navItems()
+	if len(items) == 0 || m.navSelected < 0 || m.navSelected >= len(items) {
+		return
+	}
+	item := items[m.navSelected]
+	if item.mode != "" && item.value == "" {
+		m.openNavMode()
+		return
+	}
+	if item.value != "" {
+		m.view = KindFilter
+		m.filter = Filter{}
+		switch item.mode {
+		case navTags:
+			m.filter.Tag = item.value
+		case navProjects:
+			m.filter.Project = item.value
+		case navAreas:
+			m.filter.Area = item.value
+		}
+		m.selected = 0
+		m.focusedPane = paneList
+		m.err = ""
+		return
+	}
+	if item.view != "" {
+		m.view = item.view
+		m.filter = Filter{}
+		m.selected = 0
+		m.focusedPane = paneList
+		m.err = ""
+	}
+}
+
+func (m Model) navSelectedItemOpens() bool {
+	items := m.navItems()
+	return m.navSelected >= 0 && m.navSelected < len(items) && items[m.navSelected].mode != "" && items[m.navSelected].value == ""
+}
+
+func (m *Model) openNavMode() {
+	items := m.navItems()
+	if m.navSelected < 0 || m.navSelected >= len(items) || items[m.navSelected].mode == "" {
+		return
+	}
+	m.navMode = items[m.navSelected].mode
+	m.navSelected = 0
+	m.clampNavSelection()
+}
+
+func (m *Model) clampNavSelection() {
+	items := m.navItems()
+	if len(items) == 0 {
+		m.navSelected = 0
+		return
+	}
+	if m.navSelected < 0 {
+		m.navSelected = 0
+	}
+	if m.navSelected >= len(items) {
+		m.navSelected = len(items) - 1
+	}
+}
+
+func (m Model) rootIndexForMode(mode navMode) int {
+	switch mode {
+	case navTags:
+		return 6
+	case navProjects:
+		return 7
+	case navAreas:
+		return 8
+	default:
+		return 0
+	}
 }
 
 func (m *Model) clampSelection() {
@@ -768,4 +1198,20 @@ var (
 	dayStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51"))
 	gridStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("25"))
 	weeklyColumnStyle = lipgloss.NewStyle().PaddingRight(1)
+	paneBorderStyle   = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238")).Padding(0, 1)
+	focusBorderStyle  = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("51")).Padding(0, 1)
 )
+
+func paneStyle(focused bool, width, height int) lipgloss.Style {
+	style := paneBorderStyle
+	if focused {
+		style = focusBorderStyle
+	}
+	if width > 4 {
+		style = style.Width(width - 2)
+	}
+	if height > 2 {
+		style = style.Height(height - 2)
+	}
+	return style
+}

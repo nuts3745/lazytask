@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestModelCyclesViewsAndCompletesSelectedTask(t *testing.T) {
+func TestModelCompletesSelectedTaskAndNavigatesPanes(t *testing.T) {
 	store, err := NewMemoryStore()
 	if err != nil {
 		t.Fatalf("new memory store: %v", err)
@@ -31,12 +31,99 @@ func TestModelCyclesViewsAndCompletesSelectedTask(t *testing.T) {
 		t.Fatalf("expected completed today, got %q", got.CompletedAt)
 	}
 
-	for _, want := range []ViewKind{KindToday, KindWeekly, KindAnytime, KindSomeday, KindLogbook, KindInbox} {
-		updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
-		model = updated.(Model)
-		if model.view != want {
-			t.Fatalf("expected %s view, got %s", want, model.view)
-		}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(Model)
+	if model.focusedPane != paneDetail {
+		t.Fatalf("expected detail pane, got %s", model.focusedPane)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(Model)
+	if model.focusedPane != paneNav {
+		t.Fatalf("expected nav pane, got %s", model.focusedPane)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model = updated.(Model)
+	if model.focusedPane != paneDetail {
+		t.Fatalf("expected detail pane after shift+tab, got %s", model.focusedPane)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	model = updated.(Model)
+	if model.focusedPane != paneList {
+		t.Fatalf("expected list pane after h, got %s", model.focusedPane)
+	}
+}
+
+func TestRootNavSelectsFixedView(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+	model.focusedPane = paneNav
+	model.navSelected = 2
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+
+	if model.view != KindWeekly {
+		t.Fatalf("expected weekly view, got %s", model.view)
+	}
+	if model.focusedPane != paneList {
+		t.Fatalf("expected focus to move to list, got %s", model.focusedPane)
+	}
+}
+
+func TestNavCategoryAppliesFilter(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Tagged", Start: StartAnytime, Tags: []string{"urgent"}}); err != nil {
+		t.Fatalf("create tagged task: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Other", Start: StartAnytime, Project: "Work", Area: "Home"}); err != nil {
+		t.Fatalf("create other task: %v", err)
+	}
+	model := NewModel(store)
+	model.focusedPane = paneNav
+	model.navSelected = 6
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	model = updated.(Model)
+	if model.navMode != navTags {
+		t.Fatalf("expected tags nav mode, got %s", model.navMode)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if model.view != KindFilter || model.filter.Tag != "urgent" {
+		t.Fatalf("expected urgent tag filter, got view=%s filter=%#v", model.view, model.filter)
+	}
+	if got := model.visibleTasks(); len(got) != 1 || got[0].Title != "Tagged" {
+		t.Fatalf("expected tagged task, got %#v", got)
+	}
+}
+
+func TestHelpOverlayOpensAndCloses(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	model = updated.(Model)
+	if !model.helpOpen {
+		t.Fatal("expected help overlay open")
+	}
+	if view := model.View(); !strings.Contains(view, "HELP") || !strings.Contains(view, "cycle panes") {
+		t.Fatalf("expected help overlay content:\n%s", view)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	if model.helpOpen {
+		t.Fatal("expected help overlay closed")
 	}
 }
 
@@ -201,6 +288,54 @@ func TestViewUsesAvailableHeight(t *testing.T) {
 	view := model.View()
 	if got := len(strings.Split(view, "\n")); got < 18 {
 		t.Fatalf("expected view to use available height, got %d lines:\n%s", got, view)
+	}
+}
+
+func TestThreePaneViewRendersNavListAndDetail(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{
+		Title:    "Inspect layout",
+		Start:    StartInbox,
+		Project:  "Ops",
+		Area:     "Work",
+		Tags:     []string{"urgent"},
+		Deadline: "2026-05-05",
+	}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	model := NewModel(store)
+	model.width = 130
+	model.height = 24
+
+	view := model.View()
+	for _, want := range []string{"Inbox", "Weekly", "Inspect layout", "DETAIL", "project: Ops", "tags: urgent"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in three-pane view:\n%s", want, view)
+		}
+	}
+}
+
+func TestNarrowViewOmitsDetailPane(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Narrow task", Start: StartInbox, Project: "Hidden"}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	model := NewModel(store)
+	model.width = 72
+	model.height = 18
+
+	view := model.View()
+	if !strings.Contains(view, "Narrow task") {
+		t.Fatalf("expected list task in narrow view:\n%s", view)
+	}
+	if strings.Contains(view, "DETAIL") || strings.Contains(view, "project: Hidden") {
+		t.Fatalf("expected detail pane to be omitted in narrow view:\n%s", view)
 	}
 }
 
