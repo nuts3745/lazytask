@@ -155,6 +155,22 @@ func (s *Store) Delete(id string) error {
 	return s.commit(event)
 }
 
+func (s *Store) SetWIP(id string) error {
+	event, err := newEvent(EventTaskWIPSelected, id, s.now().In(time.Local), nil)
+	if err != nil {
+		return err
+	}
+	return s.commit(event)
+}
+
+func (s *Store) ClearWIP(id string) error {
+	event, err := newEvent(EventTaskWIPCleared, id, s.now().In(time.Local), nil)
+	if err != nil {
+		return err
+	}
+	return s.commit(event)
+}
+
 func (s *Store) Get(id string) (Task, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -221,6 +237,15 @@ func (s *Store) apply(event Event) error {
 		if err := task.Input().Validate(); err != nil {
 			return err
 		}
+		if task.WIP {
+			if !task.Active() {
+				return fmt.Errorf("task is not active: %s", task.ID)
+			}
+			for id, other := range s.tasks {
+				other.WIP = false
+				s.tasks[id] = other
+			}
+		}
 		if _, exists := s.tasks[task.ID]; !exists {
 			s.order = append(s.order, task.ID)
 		}
@@ -257,6 +282,7 @@ func (s *Store) apply(event Event) error {
 			return err
 		}
 		task.CompletedAt = payload.CompletedAt
+		task.WIP = false
 		task.UpdatedAt = event.Timestamp
 		s.tasks[event.TaskID] = task
 	case EventTaskUncompleted:
@@ -277,6 +303,7 @@ func (s *Store) apply(event Event) error {
 			return err
 		}
 		task.CanceledAt = payload.CanceledAt
+		task.WIP = false
 		task.UpdatedAt = event.Timestamp
 		s.tasks[event.TaskID] = task
 	case EventTaskDeleted:
@@ -285,6 +312,30 @@ func (s *Store) apply(event Event) error {
 			return fmt.Errorf("task not found: %s", event.TaskID)
 		}
 		task.Deleted = true
+		task.WIP = false
+		task.UpdatedAt = event.Timestamp
+		s.tasks[event.TaskID] = task
+	case EventTaskWIPSelected:
+		task, ok := s.tasks[event.TaskID]
+		if !ok || task.Deleted {
+			return fmt.Errorf("task not found: %s", event.TaskID)
+		}
+		if !task.Active() {
+			return fmt.Errorf("task is not active: %s", event.TaskID)
+		}
+		for id, other := range s.tasks {
+			other.WIP = false
+			s.tasks[id] = other
+		}
+		task.WIP = true
+		task.UpdatedAt = event.Timestamp
+		s.tasks[event.TaskID] = task
+	case EventTaskWIPCleared:
+		task, ok := s.tasks[event.TaskID]
+		if !ok || task.Deleted {
+			return fmt.Errorf("task not found: %s", event.TaskID)
+		}
+		task.WIP = false
 		task.UpdatedAt = event.Timestamp
 		s.tasks[event.TaskID] = task
 	default:

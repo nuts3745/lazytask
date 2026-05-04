@@ -6,9 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type Model struct {
@@ -21,6 +23,7 @@ type Model struct {
 	height      int
 	prompt      *linePrompt
 	err         string
+	status      string
 	focusedPane paneKind
 	navSelected int
 	navMode     navMode
@@ -55,6 +58,12 @@ type navItem struct {
 	value string
 }
 
+type copyTitleResultMsg struct {
+	err error
+}
+
+var clipboardWriteAll = clipboard.WriteAll
+
 func RunTUI(path string) error {
 	store, err := NewStore(NewEventLog(path))
 	if err != nil {
@@ -75,6 +84,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if msg, ok := msg.(copyTitleResultMsg); ok {
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			m.status = ""
+			return m, nil
+		}
+		m.err = ""
+		m.status = "copied title"
+		return m, nil
+	}
 	if m.prompt != nil {
 		prompt, action, cmd := m.prompt.Update(msg)
 		m.prompt = prompt
@@ -83,6 +102,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prompt = nil
 		case promptSubmit:
 			m.err = errorString(m.runPrompt())
+			m.status = ""
 			m.prompt = nil
 			m.clampSelection()
 		}
@@ -103,9 +123,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	m.status = ""
 	switch key.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
+	case "1":
+		m.switchFixedView(KindInbox, 0)
+	case "2":
+		m.switchFixedView(KindToday, 1)
+	case "3":
+		m.switchFixedView(KindWeekly, 2)
 	case "?":
 		m.helpOpen = true
 	case "tab":
@@ -142,6 +169,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.listKeyActive() {
 			m.prompt = newLinePrompt(promptCommand, "command")
 		}
+	case "c":
+		if task, ok := m.selectedTask(); ok && m.listKeyActive() {
+			return m, copyTitleCmd(task.Title)
+		}
 	case "e":
 		if task, ok := m.selectedTask(); ok && m.listKeyActive() {
 			m.prompt = newLinePrompt(promptCommand, "edit")
@@ -155,6 +186,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_, err := m.store.Update(task.ID, input)
 			m.err = errorString(err)
 			m.clampSelection()
+		}
+	case "w":
+		if task, ok := m.selectedTask(); ok && m.listKeyActive() {
+			if task.WIP {
+				m.err = errorString(m.store.ClearWIP(task.ID))
+			} else {
+				m.err = errorString(m.store.SetWIP(task.ID))
+			}
 		}
 	case " ":
 		if task, ok := m.selectedTask(); ok && m.listKeyActive() {
@@ -174,19 +213,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	view := m.baseView()
 	if m.prompt != nil {
-		return m.prompt.View(m)
+		return overlayPromptView(view, m.prompt.popupView(m, m.promptWidth()), m.width, m.height)
 	}
+	return view
+}
+
+func (m Model) baseView() string {
 	header := m.headerView()
 	if m.err != "" {
 		header += " " + errorStyle.Render(m.err)
+	} else if m.status != "" {
+		header += " " + statusStyle.Render(" "+m.status+" ")
 	}
+	wip := m.wipView()
 	body := m.panesView(m.bodyHeight())
 	help := m.statusBarView()
 	if m.helpOpen {
 		body = overlayHelpView(m.bodyHeight(), m.width)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, header, "", body, "", help)
+	return lipgloss.JoinVertical(lipgloss.Left, header, wip, "", body, "", help)
+}
+
+func (m Model) promptWidth() int {
+	width := m.width
+	if width <= 0 {
+		width = 88
+	}
+	if width < 48 {
+		return max(1, width-2)
+	}
+	return min(78, width-10)
 }
 
 func (m Model) headerView() string {
@@ -196,11 +254,36 @@ func (m Model) headerView() string {
 	return lipgloss.JoinHorizontal(lipgloss.Center, title, " ", view, " ", count)
 }
 
+func (m Model) wipView() string {
+	width := m.width
+	if width <= 0 {
+		width = 120
+	}
+	task, ok := m.wipTask()
+	if !ok {
+		return subtleStyle.Render(truncateDisplay("WIP none", width))
+	}
+	line := "WIP " + task.Title
+	if meta := compactWIPMeta(task); meta != "" {
+		line += "  " + meta
+	}
+	return metaStyle.Render(truncateDisplay(line, width))
+}
+
+func (m Model) wipTask() (Task, bool) {
+	for _, task := range m.store.List() {
+		if task.WIP {
+			return task, true
+		}
+	}
+	return Task{}, false
+}
+
 func (m Model) bodyHeight() int {
 	if m.height <= 0 {
 		return 0
 	}
-	return max(1, m.height-4)
+	return max(1, m.height-5)
 }
 
 func (m Model) panesView(height int) string {
@@ -225,26 +308,30 @@ func (m Model) panesView(height int) string {
 	if listWidth < 28 {
 		listWidth = 28
 	}
+	contentHeight := paneContentHeight(height)
+	navTextWidth := paneTextWidth(navWidth)
+	listTextWidth := paneTextWidth(listWidth)
+	detailTextWidth := paneTextWidth(detailWidth)
 
-	nav := paneStyle(m.focusedPane == paneNav, navWidth, height).Render(m.navView(height))
+	nav := paneStyle(m.focusedPane == paneNav, navWidth, height).Render(m.navView(contentHeight, navTextWidth))
 	listModel := m
-	listModel.width = listWidth
-	list := paneStyle(m.focusedPane == paneList, listWidth, height).Render(listModel.listView(height))
+	listModel.width = listTextWidth
+	list := paneStyle(m.focusedPane == paneList, listWidth, height).Render(listModel.listView(contentHeight, listTextWidth))
 	if !showDetail {
 		return lipgloss.JoinHorizontal(lipgloss.Top, nav, strings.Repeat(" ", gap), list)
 	}
-	detail := paneStyle(m.focusedPane == paneDetail, detailWidth, height).Render(m.detailView(height))
+	detail := paneStyle(m.focusedPane == paneDetail, detailWidth, height).Render(m.detailView(contentHeight, detailTextWidth))
 	return lipgloss.JoinHorizontal(lipgloss.Top, nav, strings.Repeat(" ", gap), list, strings.Repeat(" ", gap), detail)
 }
 
-func (m Model) navView(height int) string {
+func (m Model) navView(height, width int) string {
 	items := m.navItems()
 	lines := make([]string, 0, len(items)+2)
 	if m.navMode != navRoot {
-		lines = append(lines, subtleStyle.Render("< "+strings.ToUpper(string(m.navMode))))
+		lines = append(lines, subtleStyle.Render(truncateDisplay("< "+strings.ToUpper(string(m.navMode)), width)))
 	}
 	if len(items) == 0 {
-		lines = append(lines, subtleStyle.Render("No "+string(m.navMode)))
+		lines = append(lines, subtleStyle.Render(truncateDisplay("No "+string(m.navMode), width)))
 		return fillHeight(strings.Join(lines, "\n"), height)
 	}
 	for i, item := range items {
@@ -256,7 +343,7 @@ func (m Model) navView(height int) string {
 		if item.mode != "" && item.mode != navRoot {
 			label += " >"
 		}
-		line := prefix + label
+		line := truncateDisplay(prefix+label, width)
 		if i == m.navSelected {
 			lines = append(lines, selectedStyle.Render(line))
 			continue
@@ -280,9 +367,9 @@ func (m Model) navItems() []navItem {
 		return valueNavItems(KnownAreas(m.store.List()), navAreas)
 	default:
 		return []navItem{
-			{label: "Inbox", view: KindInbox},
-			{label: "Today", view: KindToday},
-			{label: "Weekly", view: KindWeekly},
+			{label: "[1] Inbox", view: KindInbox},
+			{label: "[2] Today", view: KindToday},
+			{label: "[3] Weekly", view: KindWeekly},
 			{label: "Anytime", view: KindAnytime},
 			{label: "Someday", view: KindSomeday},
 			{label: "Logbook", view: KindLogbook},
@@ -325,7 +412,7 @@ func (m Model) navItemActive(item navItem) bool {
 	return item.view != "" && m.view == item.view
 }
 
-func (m Model) detailView(height int) string {
+func (m Model) detailView(height, width int) string {
 	task, ok := m.selectedTask()
 	if !ok {
 		lines := []string{
@@ -336,7 +423,7 @@ func (m Model) detailView(height int) string {
 			"",
 			"Select a task in the list to inspect its metadata.",
 		}
-		return fillHeight(strings.Join(lines, "\n"), height)
+		return fillHeight(truncateLines(lines, width), height)
 	}
 	lines := []string{
 		"DETAIL",
@@ -361,18 +448,24 @@ func (m Model) detailView(height int) string {
 		lines = append(lines, "", "notes:", task.Notes)
 	}
 	lines = append(lines, "", "created: "+formatTaskTime(task.CreatedAt), "updated: "+formatTaskTime(task.UpdatedAt))
-	lines = append(lines, "", helpStyle.Render("t today  space done  d delete  e edit"))
-	return fillHeight(strings.Join(lines, "\n"), height)
+	lines = append(lines, "", helpStyle.Render("w wip  t today  space done  d delete  e edit"))
+	return fillHeight(truncateLines(lines, width), height)
 }
 
 func (m Model) statusBarView() string {
-	return helpStyle.Render(fmt.Sprintf("[tab] pane  [h/l] move  [j/k] select  [enter] open  [?] help  pane:%s  [a] capture  [/] scan  [:] command  [q] exit", m.focusedPane))
+	width := m.width
+	if width <= 0 {
+		width = 120
+	}
+	line := fmt.Sprintf("[tab] pane  [j/k] select  [w] wip  [?] help  pane:%s  [a] capture  [/] scan  [:] command  [q] exit", m.focusedPane)
+	return helpStyle.Render(truncateDisplay(line, width))
 }
 
 func overlayHelpView(height, width int) string {
 	lines := []string{
 		"HELP",
 		"",
+		"1 / 2 / 3          jump to Inbox, Today, Weekly",
 		"tab / shift+tab    cycle panes",
 		"h / l              move between panes",
 		"j / k              move selection",
@@ -380,16 +473,19 @@ func overlayHelpView(height, width int) string {
 		"a                  quick add",
 		"/                  search",
 		":                  command palette",
+		"w                  toggle selected task as WIP",
 		"t                  schedule selected task today",
+		"c                  copy selected task title",
 		"space              complete or reopen selected task",
 		"d                  delete selected task",
 		"esc                close overlay or return nav to root",
 		"q                  quit",
 	}
+	contentHeight := paneContentHeight(height)
 	if width > 0 {
-		return paneStyle(true, max(40, min(width, 72)), height).Render(fillHeight(strings.Join(lines, "\n"), height))
+		return paneStyle(true, max(40, min(width, 72)), height).Render(fillHeight(strings.Join(lines, "\n"), contentHeight))
 	}
-	return fillHeight(strings.Join(lines, "\n"), height)
+	return fillHeight(strings.Join(lines, "\n"), contentHeight)
 }
 
 func (m Model) title() string {
@@ -408,34 +504,37 @@ func (m Model) title() string {
 	return "Search " + m.filter.Query
 }
 
-func (m Model) listView(height int) string {
+func (m Model) listView(height, width int) string {
 	if m.view == KindWeekly {
 		return m.weeklyView(height)
 	}
 	tasks := m.visibleTasks()
 	if len(tasks) == 0 {
-		return fillHeight(subtleStyle.Render("No tasks. Press a to capture one."), height)
+		return fillHeight(subtleStyle.Render(truncateDisplay("No tasks. Press a to capture one.", width)), height)
 	}
 	lines := make([]string, 0, len(tasks)+1)
 	for _, i := range visibleIndexes(len(tasks), m.selected, height) {
-		lines = append(lines, m.taskLine(tasks[i], i == m.selected))
+		lines = append(lines, m.taskLine(tasks[i], i == m.selected, width))
 	}
 	if height > 0 && len(tasks) > len(lines) {
-		lines = append(lines, subtleStyle.Render(fmt.Sprintf("+%d more", len(tasks)-len(lines))))
+		lines = append(lines, subtleStyle.Render(truncateDisplay(fmt.Sprintf("+%d more", len(tasks)-len(lines)), width)))
 	}
 	return fillHeight(strings.Join(lines, "\n"), height)
 }
 
 func (m Model) weeklyView(height int) string {
 	week := WorkWeek(m.store.List(), m.now())
-	flat := FlattenWeek(week)
+	for i := range week {
+		week[i].Tasks = activeTasksFirst(week[i].Tasks)
+	}
+	flat := activeTasksFirst(FlattenWeek(week))
 	selectedID := ""
 	if m.selected >= 0 && m.selected < len(flat) {
 		selectedID = flat[m.selected].ID
 	}
 	width := 24
 	if m.width > 20 {
-		width = max(16, (m.width-4)/5)
+		width = max(1, m.width/5-1)
 	}
 	taskHeight := 0
 	if height > 0 {
@@ -449,18 +548,18 @@ func (m Model) weeklyView(height int) string {
 		if taskHeight > 0 {
 			visibleTasks = visibleWeeklyTasks(day.Tasks, selectedID, taskHeight)
 		}
-		headerCells = append(headerCells, weeklyColumnStyle.Width(width).Render(dayStyle.Render("["+day.Label+" "+day.Date[5:]+"]")))
-		separatorCells = append(separatorCells, weeklyColumnStyle.Width(width).Render(gridStyle.Render(strings.Repeat("═", max(1, width-1)))))
+		headerCells = append(headerCells, weeklyColumnStyle.Width(width).Render(dayStyle.Render(truncateDisplay("["+day.Label+" "+day.Date[5:]+"]", width))))
+		separatorCells = append(separatorCells, weeklyColumnStyle.Width(width).Render(gridStyle.Render(strings.Repeat("═", max(1, width)))))
 
 		lines := make([]string, 0, len(visibleTasks)+1)
 		if len(day.Tasks) == 0 {
-			lines = append(lines, subtleStyle.Render("standby"))
+			lines = append(lines, subtleStyle.Render(truncateDisplay("standby", width)))
 		}
 		for _, task := range visibleTasks {
-			lines = append(lines, m.weeklyTaskLine(task, task.ID == selectedID, width-1))
+			lines = append(lines, m.weeklyTaskLine(task, task.ID == selectedID, width))
 		}
 		if len(visibleTasks) < len(day.Tasks) {
-			lines = append(lines, subtleStyle.Render(fmt.Sprintf("+%d more", len(day.Tasks)-len(visibleTasks))))
+			lines = append(lines, subtleStyle.Render(truncateDisplay(fmt.Sprintf("+%d more", len(day.Tasks)-len(visibleTasks)), width)))
 		}
 		body := strings.Join(lines, "\n")
 		if taskHeight > 0 {
@@ -474,7 +573,7 @@ func (m Model) weeklyView(height int) string {
 	return fillHeight(lipgloss.JoinVertical(lipgloss.Left, header, separator, body), height)
 }
 
-func (m Model) taskLine(task Task, selected bool) string {
+func (m Model) taskLine(task Task, selected bool, width int) string {
 	cursor := " "
 	if selected {
 		cursor = ">"
@@ -494,6 +593,7 @@ func (m Model) taskLine(task Task, selected bool) string {
 			line += metaStyle.Render("  " + meta)
 		}
 	}
+	line = truncateDisplay(line, width)
 	if selected {
 		return selectedStyle.Render(line)
 	}
@@ -528,6 +628,7 @@ func (m Model) weeklyTaskLine(task Task, selected bool, width int) string {
 	if meta != "" {
 		line += " " + meta
 	}
+	line = truncateDisplay(line, width)
 	if selected {
 		return selectedStyle.Render(line)
 	}
@@ -572,6 +673,25 @@ func compactWeeklyMeta(task Task) string {
 	return ""
 }
 
+func compactWIPMeta(task Task) string {
+	parts := make([]string, 0, 3)
+	if task.Start == StartDate && task.StartDate != "" {
+		parts = append(parts, "@"+task.StartDate)
+	} else if task.Start != "" {
+		parts = append(parts, "@"+string(task.Start))
+	}
+	if task.Deadline != "" {
+		parts = append(parts, "!"+task.Deadline)
+	}
+	if task.Project != "" {
+		parts = append(parts, ">"+task.Project)
+	}
+	if len(task.Tags) > 0 {
+		parts = append(parts, "#"+task.Tags[0])
+	}
+	return strings.Join(parts, " ")
+}
+
 func taskStatus(task Task) string {
 	switch {
 	case task.Deleted:
@@ -606,21 +726,45 @@ func (m Model) visibleTasks() []Task {
 	tasks := m.store.List()
 	switch m.view {
 	case KindInbox:
-		return InboxTasks(tasks)
+		return activeTasksFirst(InboxTasks(tasks))
 	case KindToday:
-		return TodayTasks(tasks, m.now())
+		return activeTasksFirst(TodayTasks(tasks, m.now()))
 	case KindWeekly:
-		return FlattenWeek(WorkWeek(tasks, m.now()))
+		return activeTasksFirst(FlattenWeek(WorkWeek(tasks, m.now())))
 	case KindAnytime:
-		return AnytimeTasks(tasks)
+		return activeTasksFirst(AnytimeTasks(tasks))
 	case KindSomeday:
-		return SomedayTasks(tasks)
+		return activeTasksFirst(SomedayTasks(tasks))
 	case KindLogbook:
-		return LogbookTasks(tasks)
+		return activeTasksFirst(LogbookTasks(tasks))
 	case KindFilter:
-		return FilteredTasks(tasks, m.filter)
+		return activeTasksFirst(FilteredTasks(tasks, m.filter))
 	default:
-		return InboxTasks(tasks)
+		return activeTasksFirst(InboxTasks(tasks))
+	}
+}
+
+func activeTasksFirst(tasks []Task) []Task {
+	if len(tasks) == 0 {
+		return tasks
+	}
+	out := make([]Task, 0, len(tasks))
+	for _, task := range tasks {
+		if task.Active() {
+			out = append(out, task)
+		}
+	}
+	for _, task := range tasks {
+		if !task.Active() {
+			out = append(out, task)
+		}
+	}
+	return out
+}
+
+func copyTitleCmd(title string) tea.Cmd {
+	return func() tea.Msg {
+		return copyTitleResultMsg{err: clipboardWriteAll(title)}
 	}
 }
 
@@ -703,6 +847,7 @@ func (m *Model) moveSelection(delta int) {
 	if m.focusedPane == paneNav {
 		m.navSelected += delta
 		m.clampNavSelection()
+		m.applySelectedNav(false)
 		return
 	}
 	if m.focusedPane == paneList {
@@ -716,13 +861,19 @@ func (m Model) listKeyActive() bool {
 }
 
 func (m *Model) activateNav() {
+	m.applySelectedNav(true)
+}
+
+func (m *Model) applySelectedNav(focusList bool) {
 	items := m.navItems()
 	if len(items) == 0 || m.navSelected < 0 || m.navSelected >= len(items) {
 		return
 	}
 	item := items[m.navSelected]
 	if item.mode != "" && item.value == "" {
-		m.openNavMode()
+		if focusList {
+			m.openNavMode()
+		}
 		return
 	}
 	if item.value != "" {
@@ -737,17 +888,33 @@ func (m *Model) activateNav() {
 			m.filter.Area = item.value
 		}
 		m.selected = 0
-		m.focusedPane = paneList
+		if focusList {
+			m.focusedPane = paneList
+		}
 		m.err = ""
+		m.status = ""
 		return
 	}
 	if item.view != "" {
-		m.view = item.view
-		m.filter = Filter{}
-		m.selected = 0
-		m.focusedPane = paneList
-		m.err = ""
+		m.applyFixedView(item.view, m.navSelected, focusList)
 	}
+}
+
+func (m *Model) switchFixedView(view ViewKind, navSelected int) {
+	m.applyFixedView(view, navSelected, true)
+}
+
+func (m *Model) applyFixedView(view ViewKind, navSelected int, focusList bool) {
+	m.view = view
+	m.filter = Filter{}
+	m.selected = 0
+	m.navMode = navRoot
+	m.navSelected = navSelected
+	if focusList {
+		m.focusedPane = paneList
+	}
+	m.err = ""
+	m.status = ""
 }
 
 func (m Model) navSelectedItemOpens() bool {
@@ -1022,17 +1189,31 @@ func (p *linePrompt) Update(msg tea.Msg) (*linePrompt, promptAction, tea.Cmd) {
 	return p, promptNone, cmd
 }
 
-func (p *linePrompt) View(m Model) string {
-	lines := []string{headerStyle.Render(" " + strings.ToUpper(p.label) + " "), p.input.View()}
+func (p *linePrompt) popupView(m Model, width int) string {
+	contentWidth := paneTextWidth(width)
+	input := p.input
+	input.Width = max(8, contentWidth)
+	lines := []string{headerStyle.Render(truncateDisplay(" "+strings.ToUpper(p.label)+" ", contentWidth)), input.View()}
 	if p.kind == promptSearch {
-		lines = append(lines, "", subtleStyle.Render("try: #urgent  >Work  /Home  today  weekly"))
-		lines = append(lines, m.searchHints(p.input.Value())...)
+		lines = append(lines, "", subtleStyle.Render(truncateDisplay("try: #urgent  >Work  /Home  today  weekly", contentWidth)))
+		lines = append(lines, truncatePromptLines(m.searchHints(p.input.Value()), contentWidth)...)
 	}
 	if p.kind == promptCommand {
-		lines = append(lines, "", subtleStyle.Render("add/tag/untag/move/area/when/deadline/done/undone/cancel/delete"))
+		lines = append(lines, "", subtleStyle.Render(truncateDisplay("add/tag/untag/move/area/when/deadline/done/undone/cancel/delete", contentWidth)))
 	}
 	lines = append(lines, "", subtleStyle.Render("enter apply  esc cancel"))
-	return strings.Join(lines, "\n")
+	style := focusBorderStyle
+	if width > 2 {
+		style = style.Width(width - 2)
+	}
+	return style.Render(fillWidthLines(strings.Join(lines, "\n"), contentWidth))
+}
+
+func truncatePromptLines(lines []string, width int) []string {
+	for i, line := range lines {
+		lines[i] = truncateDisplay(line, width)
+	}
+	return lines
 }
 
 func (m Model) searchHints(query string) []string {
@@ -1113,6 +1294,34 @@ func truncateRunes(value string, width int) string {
 	return string(runes[:width-3]) + "..."
 }
 
+func truncateDisplay(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(value) <= width {
+		return value
+	}
+	if width <= 3 {
+		return ansi.Truncate(value, width, "")
+	}
+	return ansi.Truncate(value, width, "...")
+}
+
+func truncateLines(lines []string, width int) string {
+	for i, line := range lines {
+		lines[i] = truncateDisplay(line, width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func fillWidthLines(value string, width int) string {
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = lipgloss.PlaceHorizontal(width, lipgloss.Left, truncateDisplay(line, width))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func fillHeight(value string, height int) string {
 	if height <= 0 {
 		return value
@@ -1125,6 +1334,67 @@ func fillHeight(value string, height int) string {
 		lines = append(lines, "")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func paneContentHeight(height int) int {
+	if height <= 2 {
+		return 0
+	}
+	return height - 2
+}
+
+func paneTextWidth(width int) int {
+	if width <= 4 {
+		return 0
+	}
+	return width - 4
+}
+
+func overlayPromptView(base, popup string, width, height int) string {
+	baseLines := strings.Split(base, "\n")
+	popupLines := strings.Split(popup, "\n")
+	if width <= 0 {
+		width = maxLineWidth(baseLines)
+	}
+	if height <= 0 {
+		height = len(baseLines)
+	}
+	for len(baseLines) < height {
+		baseLines = append(baseLines, "")
+	}
+	if len(baseLines) > height {
+		baseLines = baseLines[:height]
+	}
+	for i, line := range baseLines {
+		baseLines[i] = lipgloss.PlaceHorizontal(width, lipgloss.Left, truncateDisplay(line, width))
+	}
+	top := max(0, (height-len(popupLines))/2)
+	for i, line := range popupLines {
+		row := top + i
+		if row >= height {
+			break
+		}
+		baseLines[row] = overlayLine(baseLines[row], truncateDisplay(line, width), width)
+	}
+	return strings.Join(baseLines, "\n")
+}
+
+func overlayLine(base, popup string, width int) string {
+	popupWidth := lipgloss.Width(popup)
+	if popupWidth >= width {
+		return truncateDisplay(popup, width)
+	}
+	left := max(0, (width-popupWidth)/2)
+	right := left + popupWidth
+	return ansi.Cut(base, 0, left) + popup + ansi.Cut(base, right, width)
+}
+
+func maxLineWidth(lines []string) int {
+	width := 0
+	for _, line := range lines {
+		width = max(width, lipgloss.Width(line))
+	}
+	return width
 }
 
 func visibleIndexes(total, selected, height int) []int {

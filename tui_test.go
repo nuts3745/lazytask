@@ -1,10 +1,13 @@
 package lazytask
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestModelCompletesSelectedTaskAndNavigatesPanes(t *testing.T) {
@@ -73,6 +76,261 @@ func TestRootNavSelectsFixedView(t *testing.T) {
 	}
 }
 
+func TestRootNavDisplaysShortcutLabels(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+
+	view := model.navView(12, 40)
+	for _, want := range []string{"[1] Inbox", "[2] Today", "[3] Weekly"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected shortcut label %q in nav:\n%s", want, view)
+		}
+	}
+}
+
+func TestRootNavMoveAppliesFixedViewWithoutMovingFocus(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+	model.focusedPane = paneNav
+	model.navSelected = 0
+	model.selected = 3
+	model.err = "old error"
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = updated.(Model)
+
+	if model.view != KindToday {
+		t.Fatalf("expected today view, got %s", model.view)
+	}
+	if model.focusedPane != paneNav {
+		t.Fatalf("expected focus to stay on nav, got %s", model.focusedPane)
+	}
+	if model.navMode != navRoot || model.navSelected != 1 {
+		t.Fatalf("expected root nav item 1, got mode=%s selected=%d", model.navMode, model.navSelected)
+	}
+	if model.selected != 0 || model.filter != (Filter{}) || model.err != "" {
+		t.Fatalf("expected reset selection/filter/error, got selected=%d filter=%#v err=%q", model.selected, model.filter, model.err)
+	}
+}
+
+func TestVisibleTasksKeepsInactiveTasksBelowActiveTasks(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	store.SetClock(fixedClock("2026-05-04"))
+	done, err := store.Create(TaskInput{Title: "Done first", Start: StartDate, StartDate: "2026-05-04"})
+	if err != nil {
+		t.Fatalf("create done task: %v", err)
+	}
+	if err := store.Complete(done.ID, "2026-05-04"); err != nil {
+		t.Fatalf("complete task: %v", err)
+	}
+	active, err := store.Create(TaskInput{Title: "Active second", Start: StartDate, StartDate: "2026-05-04"})
+	if err != nil {
+		t.Fatalf("create active task: %v", err)
+	}
+	canceled, err := store.Create(TaskInput{Title: "Canceled third", Start: StartDate, StartDate: "2026-05-04"})
+	if err != nil {
+		t.Fatalf("create canceled task: %v", err)
+	}
+	if err := store.Cancel(canceled.ID, "2026-05-04"); err != nil {
+		t.Fatalf("cancel task: %v", err)
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+
+	for _, view := range []ViewKind{KindToday, KindWeekly, KindFilter} {
+		model.view = view
+		model.filter = Filter{}
+		got := model.visibleTasks()
+		if len(got) != 3 {
+			t.Fatalf("%s expected 3 tasks, got %#v", view, got)
+		}
+		if got[0].ID != active.ID || got[1].ID != done.ID || got[2].ID != canceled.ID {
+			t.Fatalf("%s expected active then inactive in stable order, got %#v", view, got)
+		}
+	}
+}
+
+func TestWeeklyViewKeepsInactiveTasksBelowActiveTasksInColumns(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	store.SetClock(fixedClock("2026-05-04"))
+	done, err := store.Create(TaskInput{Title: "Done first", Start: StartDate, StartDate: "2026-05-04"})
+	if err != nil {
+		t.Fatalf("create done task: %v", err)
+	}
+	if err := store.Complete(done.ID, "2026-05-04"); err != nil {
+		t.Fatalf("complete task: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Active second", Start: StartDate, StartDate: "2026-05-04"}); err != nil {
+		t.Fatalf("create active task: %v", err)
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+	model.view = KindWeekly
+	model.width = 100
+
+	view := model.weeklyView(8)
+	activeIndex := strings.Index(view, "Active")
+	doneIndex := strings.Index(view, "Done first")
+	if activeIndex < 0 || doneIndex < 0 {
+		t.Fatalf("expected both weekly tasks:\n%s", view)
+	}
+	if activeIndex > doneIndex {
+		t.Fatalf("expected active task before completed task in weekly column:\n%s", view)
+	}
+}
+
+func TestCKeyCopiesSelectedTaskTitle(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Copy only this title", Start: StartInbox, Notes: "not copied"}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	oldWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = oldWrite }()
+	var copied []string
+	clipboardWriteAll = func(value string) error {
+		copied = append(copied, value)
+		return nil
+	}
+	model := NewModel(store)
+	model.err = "old error"
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected copy command")
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(Model)
+
+	if len(copied) != 1 || copied[0] != "Copy only this title" {
+		t.Fatalf("expected selected title copied, got %#v", copied)
+	}
+	if model.err != "" {
+		t.Fatalf("expected copy success to clear error, got %q", model.err)
+	}
+	if model.status != "copied title" {
+		t.Fatalf("expected copy status, got %q", model.status)
+	}
+}
+
+func TestCKeyShowsClipboardWriteError(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Copy fails", Start: StartInbox}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	oldWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = oldWrite }()
+	clipboardWriteAll = func(string) error {
+		return errors.New("clipboard unavailable")
+	}
+	model := NewModel(store)
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected copy command")
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(Model)
+
+	if model.err != "clipboard unavailable" {
+		t.Fatalf("expected clipboard error, got %q", model.err)
+	}
+	if model.status != "" {
+		t.Fatalf("expected failed copy to clear status, got %q", model.status)
+	}
+}
+
+func TestCKeyDoesNotCopyWithoutListSelection(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Do not copy from nav", Start: StartInbox}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	oldWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = oldWrite }()
+	clipboardWriteAll = func(string) error {
+		t.Fatal("clipboard write should not be called")
+		return nil
+	}
+
+	model := NewModel(store)
+	model.focusedPane = paneNav
+	if _, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}}); cmd != nil {
+		t.Fatal("expected no copy command while nav is focused")
+	}
+	model.focusedPane = paneList
+	model.selected = 10
+	if _, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}}); cmd != nil {
+		t.Fatal("expected no copy command without selected task")
+	}
+}
+
+func TestNumberKeysJumpToCommonViews(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+	model.view = KindSomeday
+	model.focusedPane = paneNav
+	model.navMode = navTags
+	model.navSelected = 3
+	model.selected = 4
+	model.filter = Filter{Tag: "urgent"}
+	model.err = "old error"
+
+	for _, tc := range []struct {
+		key         string
+		wantView    ViewKind
+		wantNavItem int
+	}{
+		{key: "1", wantView: KindInbox, wantNavItem: 0},
+		{key: "2", wantView: KindToday, wantNavItem: 1},
+		{key: "3", wantView: KindWeekly, wantNavItem: 2},
+	} {
+		updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)})
+		model = updated.(Model)
+
+		if model.view != tc.wantView {
+			t.Fatalf("key %s expected view %s, got %s", tc.key, tc.wantView, model.view)
+		}
+		if model.focusedPane != paneList || model.navMode != navRoot || model.navSelected != tc.wantNavItem {
+			t.Fatalf("key %s expected list/root nav item %d, got pane=%s mode=%s nav=%d", tc.key, tc.wantNavItem, model.focusedPane, model.navMode, model.navSelected)
+		}
+		if model.selected != 0 || model.filter != (Filter{}) || model.err != "" {
+			t.Fatalf("key %s expected reset selection/filter/error, got selected=%d filter=%#v err=%q", tc.key, model.selected, model.filter, model.err)
+		}
+		model.view = KindSomeday
+		model.focusedPane = paneNav
+		model.navMode = navTags
+		model.navSelected = 3
+		model.selected = 4
+		model.filter = Filter{Tag: "urgent"}
+		model.err = "old error"
+	}
+}
+
 func TestNavCategoryAppliesFilter(t *testing.T) {
 	store, err := NewMemoryStore()
 	if err != nil {
@@ -102,6 +360,70 @@ func TestNavCategoryAppliesFilter(t *testing.T) {
 	if got := model.visibleTasks(); len(got) != 1 || got[0].Title != "Tagged" {
 		t.Fatalf("expected tagged task, got %#v", got)
 	}
+	if model.focusedPane != paneList {
+		t.Fatalf("expected focus to move to list, got %s", model.focusedPane)
+	}
+}
+
+func TestNavMoveAppliesSubmenuFilterWithoutMovingFocus(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Alpha", Start: StartAnytime, Tags: []string{"alpha"}}); err != nil {
+		t.Fatalf("create alpha task: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Urgent", Start: StartAnytime, Tags: []string{"urgent"}}); err != nil {
+		t.Fatalf("create urgent task: %v", err)
+	}
+	model := NewModel(store)
+	model.focusedPane = paneNav
+	model.navMode = navTags
+	model.navSelected = 0
+	model.selected = 5
+	model.err = "old error"
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = updated.(Model)
+
+	if model.view != KindFilter || model.filter.Tag != "urgent" {
+		t.Fatalf("expected urgent tag filter, got view=%s filter=%#v", model.view, model.filter)
+	}
+	if got := model.visibleTasks(); len(got) != 1 || got[0].Title != "Urgent" {
+		t.Fatalf("expected urgent task, got %#v", got)
+	}
+	if model.focusedPane != paneNav || model.navMode != navTags || model.navSelected != 1 {
+		t.Fatalf("expected focus to stay on tag nav item 1, got pane=%s mode=%s selected=%d", model.focusedPane, model.navMode, model.navSelected)
+	}
+	if model.selected != 0 || model.err != "" {
+		t.Fatalf("expected reset selection/error, got selected=%d err=%q", model.selected, model.err)
+	}
+}
+
+func TestNavMoveToCategoryHeaderDoesNotOpenSubmenu(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+	model.focusedPane = paneNav
+	model.view = KindLogbook
+	model.navSelected = 5
+	model.selected = 2
+	model.err = "old error"
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = updated.(Model)
+
+	if model.navMode != navRoot || model.navSelected != 6 {
+		t.Fatalf("expected root nav category selected, got mode=%s selected=%d", model.navMode, model.navSelected)
+	}
+	if model.view != KindLogbook || model.focusedPane != paneNav {
+		t.Fatalf("expected category move to leave view/focus unchanged, got view=%s pane=%s", model.view, model.focusedPane)
+	}
+	if model.selected != 2 || model.err != "old error" {
+		t.Fatalf("expected category move to leave selection/error unchanged, got selected=%d err=%q", model.selected, model.err)
+	}
 }
 
 func TestHelpOverlayOpensAndCloses(t *testing.T) {
@@ -125,6 +447,36 @@ func TestHelpOverlayOpensAndCloses(t *testing.T) {
 	if model.helpOpen {
 		t.Fatal("expected help overlay closed")
 	}
+}
+
+func TestPromptRendersAsPopupOverMainView(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+	model.width = 100
+	model.height = 20
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	model = updated.(Model)
+
+	view := model.View()
+	if !strings.Contains(view, "LAZYTASK") || !strings.Contains(view, "ADD") || !strings.Contains(view, "enter apply") {
+		t.Fatalf("expected add prompt popup over main view:\n%s", view)
+	}
+	if !strings.Contains(view, "pane:list") {
+		t.Fatalf("expected main status bar to remain visible behind popup:\n%s", view)
+	}
+	if got := len(strings.Split(view, "\n")); got != model.height {
+		t.Fatalf("expected prompt popup to preserve height %d, got %d:\n%s", model.height, got, view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, " ADD ") && strings.TrimSpace(ansi.Cut(line, 0, 1)) == "" {
+			t.Fatalf("expected popup row to preserve background beside popup:\n%s", view)
+		}
+	}
+	assertViewWidth(t, view, model.width)
 }
 
 func TestRunCommandAddsAndOrganizesTask(t *testing.T) {
@@ -251,6 +603,98 @@ func TestTodayAddRespectsExplicitSomeday(t *testing.T) {
 	}
 }
 
+func TestWKeyTogglesSelectedActiveTaskAsWIP(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	task, err := store.Create(TaskInput{Title: "Focus task", Start: StartInbox, Project: "Work"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	model := NewModel(store)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	model = updated.(Model)
+	got, _ := store.Get(task.ID)
+	if !got.WIP {
+		t.Fatalf("expected selected task to be WIP: %#v", got)
+	}
+	if view := model.View(); !strings.Contains(view, "WIP Focus task") || !strings.Contains(view, ">Work") {
+		t.Fatalf("expected WIP row with compact metadata:\n%s", view)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	model = updated.(Model)
+	got, _ = store.Get(task.ID)
+	if got.WIP {
+		t.Fatalf("expected second w press to clear WIP: %#v", got)
+	}
+	if view := model.View(); !strings.Contains(view, "WIP none") {
+		t.Fatalf("expected empty WIP state:\n%s", view)
+	}
+}
+
+func TestWKeyRejectsInactiveTask(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*Store, string) error
+	}{
+		{name: "completed", run: func(store *Store, id string) error { return store.Complete(id, "2026-05-04") }},
+		{name: "canceled", run: func(store *Store, id string) error { return store.Cancel(id, "2026-05-04") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := NewMemoryStore()
+			if err != nil {
+				t.Fatalf("new memory store: %v", err)
+			}
+			task, err := store.Create(TaskInput{Title: "Inactive task", Start: StartAnytime})
+			if err != nil {
+				t.Fatalf("create task: %v", err)
+			}
+			if err := tc.run(store, task.ID); err != nil {
+				t.Fatalf("%s task: %v", tc.name, err)
+			}
+			model := NewModel(store)
+			model.now = fixedClock("2026-05-04")
+			model.view = KindLogbook
+
+			updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+			model = updated.(Model)
+
+			got, _ := store.Get(task.ID)
+			if got.WIP {
+				t.Fatalf("%s task should not become WIP: %#v", tc.name, got)
+			}
+			if !strings.Contains(model.err, "task is not active") {
+				t.Fatalf("expected clear inactive-task error, got %q", model.err)
+			}
+		})
+	}
+}
+
+func TestWIPRowAppearsInFixedViewsAndPreservesHeight(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+	model.width = 100
+	model.height = 18
+
+	for _, viewKind := range []ViewKind{KindInbox, KindToday, KindWeekly, KindAnytime, KindSomeday, KindLogbook} {
+		model.view = viewKind
+		view := model.View()
+		if !strings.Contains(view, "WIP none") {
+			t.Fatalf("expected WIP row in %s view:\n%s", viewKind, view)
+		}
+		if got := len(strings.Split(view, "\n")); got != model.height {
+			t.Fatalf("expected %s view height %d, got %d:\n%s", viewKind, model.height, got, view)
+		}
+	}
+}
+
 func TestWeeklyViewDoesNotCollapseJapaneseTaskToEllipsis(t *testing.T) {
 	store, err := NewMemoryStore()
 	if err != nil {
@@ -286,9 +730,30 @@ func TestViewUsesAvailableHeight(t *testing.T) {
 	model.height = 18
 
 	view := model.View()
-	if got := len(strings.Split(view, "\n")); got < 18 {
+	if got := len(strings.Split(view, "\n")); got != 18 {
 		t.Fatalf("expected view to use available height, got %d lines:\n%s", got, view)
 	}
+}
+
+func TestTodayViewDoesNotExceedAvailableHeight(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	if _, err := store.Create(TaskInput{Title: "Today task", Start: StartDate, StartDate: "2026-05-04"}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	model := NewModel(store)
+	model.now = fixedClock("2026-05-04")
+	model.view = KindToday
+	model.width = 100
+	model.height = 18
+
+	view := model.View()
+	if got := len(strings.Split(view, "\n")); got != 18 {
+		t.Fatalf("expected today view to fit available height, got %d lines:\n%s", got, view)
+	}
+	assertViewWidth(t, view, model.width)
 }
 
 func TestThreePaneViewRendersNavListAndDetail(t *testing.T) {
@@ -354,11 +819,21 @@ func TestWeeklyViewUsesAvailableHeight(t *testing.T) {
 	model.height = 18
 
 	view := model.View()
-	if got := len(strings.Split(view, "\n")); got < 18 {
+	if got := len(strings.Split(view, "\n")); got != 18 {
 		t.Fatalf("expected weekly view to use available height, got %d lines:\n%s", got, view)
 	}
 	if !strings.Contains(view, "Weekly task") {
 		t.Fatalf("expected weekly task in view:\n%s", view)
+	}
+	assertViewWidth(t, view, model.width)
+}
+
+func assertViewWidth(t *testing.T, view string, width int) {
+	t.Helper()
+	for i, line := range strings.Split(view, "\n") {
+		if got := lipgloss.Width(line); got > width {
+			t.Fatalf("expected line %d to fit width %d, got %d:\n%s", i+1, width, got, view)
+		}
 	}
 }
 
@@ -422,7 +897,7 @@ func TestCompletedTaskLineDoesNotLeakANSISequences(t *testing.T) {
 		StartDate:   "2026-04-28",
 		Deadline:    "2026-04-29",
 		CompletedAt: "2026-05-03",
-	}, false)
+	}, false, 80)
 
 	if strings.Contains(line, "[38;5;") || strings.Contains(line, "[0m") {
 		t.Fatalf("completed line leaked ansi sequence: %q", line)

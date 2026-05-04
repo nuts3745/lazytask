@@ -28,6 +28,7 @@ type Task struct {
 	Deadline    string    `json:"deadline,omitempty"`
 	CompletedAt string    `json:"completedAt,omitempty"`
 	CanceledAt  string    `json:"canceledAt,omitempty"`
+	WIP         bool      `json:"wip,omitempty"`
 	Project     string    `json:"project,omitempty"`
 	Area        string    `json:"area,omitempty"`
 	Tags        []string  `json:"tags,omitempty"`
