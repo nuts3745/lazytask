@@ -3,12 +3,19 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/nuts3745/lazytask/internal/lazytask"
 )
 
+const defaultLogName = "lazytask.jsonl"
+
 func main() {
-	path := "lazytask.jsonl"
+	path, err := defaultLogPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if len(os.Args) > 1 {
 		if os.Args[1] == "compact" {
 			if len(os.Args) > 2 {
@@ -36,4 +43,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func defaultLogPath() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config dir: %w", err)
+	}
+	return logPathInConfigDir(configDir), nil
+}
+
+func logPathInConfigDir(configDir string) string {
+	return filepath.Join(configDir, "lazytask", defaultLogName)
 }

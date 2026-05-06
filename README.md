@@ -14,7 +14,7 @@ go install github.com/nuts3745/lazytask@latest
 lazytask
 ```
 
-By default, LazyTask writes events to `./lazytask.jsonl`. Pass a path to use another log file:
+By default, LazyTask writes events under your user config directory so it does not create files in the current working directory. On macOS this is typically `~/Library/Application Support/lazytask/lazytask.jsonl`; on Linux it is typically `~/.config/lazytask/lazytask.jsonl`. Pass a path to use another log file:
 
 ```sh
 lazytask ./demo.jsonl
@@ -26,7 +26,7 @@ To compact a long event log into the current task state without starting the TUI
 lazytask compact [path]
 ```
 
-If `path` is omitted, LazyTask compacts `./lazytask.jsonl`.
+If `path` is omitted, LazyTask compacts the default user config log.
 
 ## Quick Add
 

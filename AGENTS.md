@@ -19,7 +19,7 @@ Keep the root package limited to the CLI entrypoint. Add reusable package code u
 - `go test -race ./...` runs tests with the race detector; use this for changes touching `Store` concurrency.
 - `go test -cover ./...` reports package test coverage.
 - `go build ./...` verifies the package compiles.
-- `go run .` starts the TUI using `./lazytask.jsonl`.
+- `go run .` starts the TUI using the default user config log.
 - `gofmt -w main.go internal/lazytask/*.go` formats Go files before committing.
 
 There is no asset build step.
