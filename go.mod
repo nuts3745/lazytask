@@ -1,4 +1,4 @@
-module lazytask
+module github.com/nuts3745/lazytask
 
 go 1.24.2
 

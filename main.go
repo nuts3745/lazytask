@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"lazytask"
+	"github.com/nuts3745/lazytask/internal/lazytask"
 )
 
 func main() {

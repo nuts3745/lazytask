@@ -2,22 +2,28 @@
 
 LazyTask is a fast, Things-inspired terminal task manager. It favors quick capture, tag-based sorting, a clear Today list, and a Monday-Friday Weekly view. State is stored as a lightweight JSONL event log.
 
+## Install
+
+```sh
+go install github.com/nuts3745/lazytask@latest
+```
+
 ## Run
 
 ```sh
-go run ./cmd/lazytask
+lazytask
 ```
 
 By default, LazyTask writes events to `./lazytask.jsonl`. Pass a path to use another log file:
 
 ```sh
-go run ./cmd/lazytask ./demo.jsonl
+lazytask ./demo.jsonl
 ```
 
 To compact a long event log into the current task state without starting the TUI, run:
 
 ```sh
-go run ./cmd/lazytask compact [path]
+lazytask compact [path]
 ```
 
 If `path` is omitted, LazyTask compacts `./lazytask.jsonl`.

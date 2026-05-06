@@ -2,16 +2,16 @@
 
 ## Project Structure & Module Organization
 
-LazyTask is a Go 1.24 terminal task manager. Library source files live at the repository root, and the CLI entrypoint lives under `cmd/lazytask`:
+LazyTask is a Go 1.24 terminal task manager. The root package is the installable CLI entrypoint. Reusable implementation code lives under `internal/lazytask`:
 
-- `task.go` defines the Things-style task model and input validation.
-- `parser.go` parses quick-add and command date syntax.
-- `event.go` reads and appends JSONL events.
-- `store.go` replays events into the current task projection.
-- `views.go` contains fixed views, Weekly projection, and loose metadata filters.
-- `tui.go` contains the Bubble Tea model and key handling.
+- `internal/lazytask/task.go` defines the Things-style task model and input validation.
+- `internal/lazytask/parser.go` parses quick-add and command date syntax.
+- `internal/lazytask/event.go` reads and appends JSONL events.
+- `internal/lazytask/store.go` replays events into the current task projection.
+- `internal/lazytask/views.go` contains fixed views, Weekly projection, and loose metadata filters.
+- `internal/lazytask/tui.go` contains the Bubble Tea model and key handling.
 
-Keep reusable package code in root-level `.go` files. Put executable commands under `cmd/`. Add tests beside the code with `_test.go` suffixes.
+Keep the root package limited to the CLI entrypoint. Add reusable package code under `internal/lazytask`. Add tests beside the code with `_test.go` suffixes.
 
 ## Build, Test, and Development Commands
 
@@ -19,8 +19,8 @@ Keep reusable package code in root-level `.go` files. Put executable commands un
 - `go test -race ./...` runs tests with the race detector; use this for changes touching `Store` concurrency.
 - `go test -cover ./...` reports package test coverage.
 - `go build ./...` verifies the package compiles.
-- `go run ./cmd/lazytask` starts the TUI using `./lazytask.jsonl`.
-- `gofmt -w *.go` formats root Go files before committing.
+- `go run .` starts the TUI using `./lazytask.jsonl`.
+- `gofmt -w main.go internal/lazytask/*.go` formats Go files before committing.
 
 There is no asset build step.
 
