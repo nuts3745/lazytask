@@ -54,6 +54,12 @@ func TestModelCompletesSelectedTaskAndNavigatesPanes(t *testing.T) {
 	if model.focusedPane != paneList {
 		t.Fatalf("expected list pane after h, got %s", model.focusedPane)
 	}
+	model.focusedPane = paneDetail
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	model = updated.(Model)
+	if model.focusedPane != paneList {
+		t.Fatalf("expected list pane after 0, got %s", model.focusedPane)
+	}
 }
 
 func TestRootNavSelectsFixedView(t *testing.T) {

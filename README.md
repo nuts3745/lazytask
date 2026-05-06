@@ -37,7 +37,7 @@ Press `a` and enter a single-line task:
 
 ## Views
 
-Use `1`, `2`, and `3` to jump to Inbox, Today, and Weekly. Use `tab` / `shift+tab` to cycle panes.
+Use `0` to jump to the task list pane. Use `1`, `2`, and `3` to jump to Inbox, Today, and Weekly. Use `tab` / `shift+tab` to cycle panes.
 
 - Today shows active tasks scheduled or due today, plus tasks completed today.
 - Weekly shows Monday-Friday planned, due, completed, and canceled tasks.
@@ -48,6 +48,7 @@ Use `1`, `2`, and `3` to jump to Inbox, Today, and Weekly. Use `tab` / `shift+ta
 
 - `/`: fzf-style search. Try `#urgent`, `>Work`, `/Home`, `today`, or `weekly`.
 - `:`: command palette. Commands include `add`, `tag`, `untag`, `move`, `area`, `when`, `deadline`, `done`, `undone`, `cancel`, and `delete`.
+- `0`: jump to the task list pane.
 - `1` / `2` / `3`: jump to Inbox, Today, or Weekly.
 - `j` / `k`: move selection.
 - `w`: toggle the selected active task as the global WIP.

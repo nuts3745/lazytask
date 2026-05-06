@@ -127,6 +127,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
+	case "0":
+		m.focusedPane = paneList
 	case "1":
 		m.switchFixedView(KindInbox, 0)
 	case "2":
@@ -457,7 +459,7 @@ func (m Model) statusBarView() string {
 	if width <= 0 {
 		width = 120
 	}
-	line := fmt.Sprintf("[tab] pane  [j/k] select  [w] wip  [?] help  pane:%s  [a] capture  [/] scan  [:] command  [q] exit", m.focusedPane)
+	line := fmt.Sprintf("[0] list  [tab] pane  [j/k] select  [w] wip  [?] help  pane:%s  [a] capture  [/] scan  [:] command  [q] exit", m.focusedPane)
 	return helpStyle.Render(truncateDisplay(line, width))
 }
 
@@ -465,6 +467,7 @@ func overlayHelpView(height, width int) string {
 	lines := []string{
 		"HELP",
 		"",
+		"0                  jump to task list pane",
 		"1 / 2 / 3          jump to Inbox, Today, Weekly",
 		"tab / shift+tab    cycle panes",
 		"h / l              move between panes",
